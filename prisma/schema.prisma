@@ -1,0 +1,57 @@
+// Atrium data layer — scaffold of the spec draft (art_GK3oaS4e, Architecture).
+// SQLite has no enum type, so room kinds are a validated string union at the
+// app layer ("pod" | "huddle" | "boardroom" | "stage").
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Avatar {
+  id        String   @id @default(cuid())
+  name      String
+  color     String
+  hat       String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Room {
+  id        String   @id @default(cuid())
+  name      String
+  kind      String // pod | huddle | boardroom | stage
+  capacity  Int
+  isSpawned Boolean  @default(false)
+  bookings  Booking[]
+  strokes   WhiteboardStroke[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([kind])
+}
+
+model Booking {
+  id        String   @id @default(cuid())
+  roomId    String
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  title     String
+  startsAt  DateTime
+  endsAt    DateTime
+  createdAt DateTime @default(now())
+
+  @@index([roomId, startsAt])
+}
+
+model WhiteboardStroke {
+  id        String   @id @default(cuid())
+  roomId    String
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  data      String // JSON-encoded stroke points and style
+  createdAt DateTime @default(now())
+
+  @@index([roomId])
+}
