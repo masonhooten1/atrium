@@ -1,0 +1,29 @@
+# dependencies
+node_modules/
+
+# next.js
+.next/
+out/
+
+# env
+.env
+.env*.local
+
+# databases
+*.db
+*.db-journal
+
+# builds and caches
+*.tsbuildinfo
+.eslintcache
+
+# test tooling
+playwright-report/
+test-results/
+
+# logs
+npm-debug.log*
+*.log
+
+# os
+.DS_Store
