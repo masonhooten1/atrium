@@ -3,10 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { io, type Socket } from 'socket.io-client'
 import JoinPanel from './JoinPanel'
-import { drawWorld, screenDirToWorldDir, screenToIso, type AvatarDraw } from './world/renderer'
+import RoomView, { type ActiveRoom } from './RoomView'
+import { drawWorld, screenDirToWorldDir, screenToIso, type AvatarDraw, type DoorDraw } from './world/renderer'
 import { clampToWorld, SPAWN, stepToward, type Vec2 } from '@/lib/world'
 import { removePeer, snapshot, upsertPeer, newPeerBook, type PeerBook } from '@/lib/presence'
-import type { JoinAck } from '@/lib/protocol'
+import { doorNear, zoneAt, ROOMS } from '@/lib/rooms'
+import type { JoinAck, RoomJoinAck, RoomSummary, WebRTCPacket } from '@/lib/protocol'
 import type { AvatarProfile } from '@/lib/avatar-presets'
 
 const SPEED = 3.5 // world tiles per second
@@ -32,14 +34,30 @@ interface Sim {
   cam: Vec2
   book: PeerBook
   renders: Map<string, Vec2>
+  // Huddle zone the avatar currently stands in (zone id or null) — change
+  // detection lives in the loop so React state only flips on transitions.
+  zoneId: string | null
 }
 
 export default function WorldCanvas() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const socketRef = useRef<Socket | null>(null)
+  // WebRTC signaling is captured at the socket level from the moment the
+  // transport exists — a relayed offer can outrun RoomView's mount, and
+  // socket.io drops events nobody is listening for.
+  const signalSinkRef = useRef<((p: WebRTCPacket) => void) | null>(null)
+  const pendingSignalsRef = useRef<WebRTCPacket[]>([])
   const [profile, setProfile] = useState<AvatarProfile | null>(null)
   const profileRef = useRef<AvatarProfile | null>(null)
   const [roster, setRoster] = useState<RosterRow[]>([])
+  const [rooms, setRooms] = useState<RoomSummary[]>([])
+  const [activeRoom, setActiveRoom] = useState<ActiveRoom | null>(null)
+  const [toast, setToast] = useState<string | null>(null)
+  const [zoneOffer, setZoneOffer] = useState<string | null>(null)
+  // Refs mirror the state the canvas loop and socket callbacks read without
+  // re-subscribing: door summaries, and the room we are currently inside.
+  const roomsRef = useRef<RoomSummary[]>([])
+  const activeRoomRef = useRef<ActiveRoom | null>(null)
   const simRef = useRef<Sim>({
     self: null,
     keys: new Set(),
@@ -47,17 +65,73 @@ export default function WorldCanvas() {
     cam: { ...SPAWN },
     book: newPeerBook(),
     renders: new Map(),
+    zoneId: null,
   })
+
+  // Join presence: the ack is the truth — the server places us at spawn and
+  // answers with the world as it is. Also the recovery path after a reconnect,
+  // when the server has dropped our old incarnation and its id changed.
+  const joinPresence = useCallback((socket: Socket) => {
+    const p = profileRef.current
+    if (!p) return
+    socket.emit('presence:join', p, (ack: JoinAck) => {
+      if (!ack.ok) return
+      simRef.current.self = {
+        id: ack.self.id,
+        pos: { x: ack.self.x, y: ack.self.y },
+        render: { x: ack.self.x, y: ack.self.y },
+        moving: false,
+      }
+      simRef.current.cam = { x: ack.self.x, y: ack.self.y }
+      simRef.current.book.peers.clear()
+      simRef.current.renders.clear()
+      for (const peer of ack.peers) {
+        if (peer.id === ack.self.id) continue
+        upsertPeer(simRef.current.book, peer)
+        simRef.current.renders.set(peer.id, { x: peer.x, y: peer.y })
+      }
+    })
+  }, [])
+
+  // Ask the server for a seat. The ack is the truth: a refusal shows on the
+  // door as a toast, never as a silent failure — and after a reconnect it
+  // drops the stale room view instead.
+  const requestRoomJoin = useCallback((roomId: string, onRefused?: () => void) => {
+    socketRef.current?.emit('room:join', { roomId }, (ack: RoomJoinAck) => {
+      if (!ack.ok) {
+        onRefused?.()
+        const summary = roomsRef.current.find((r) => r.id === roomId)
+        const name = summary?.name ?? roomId
+        setToast(
+          ack.reason === 'full'
+            ? `${name} is full (${summary?.capacity ?? '?'} seats taken).`
+            : ack.reason === 'reserved'
+              ? `${name} is reserved for an upcoming meeting.`
+              : `${name} is not open yet.`,
+        )
+        return
+      }
+      activeRoomRef.current = {
+        id: ack.room.id,
+        name: ack.room.name,
+        capacity: ack.room.capacity,
+        peers: ack.peers,
+      }
+      setActiveRoom(activeRoomRef.current)
+      setZoneOffer(null)
+    })
+  }, [])
 
   const handleJoin = useCallback((p: AvatarProfile) => {
     profileRef.current = p
     setProfile(p)
 
     // Bring the transport up (or reuse it after a reconnect) and join the
-    // street. The server places us at spawn and answers with the world.
+    // street. WebSocket-only: the polling fallback's upgrade churn under load
+    // is the one transport failure the street cannot survive gracefully.
     let socket = socketRef.current
     if (!socket) {
-      socket = io()
+      socket = io(undefined, { transports: ['websocket'] })
       socketRef.current = socket
       const sim = simRef.current
       socket.on('presence:state', ({ peers }) => {
@@ -81,26 +155,74 @@ export default function WorldCanvas() {
           upsertPeer(sim.book, peer)
         }
       })
+      socket.on('room:summary', ({ rooms: summaries }) => {
+        roomsRef.current = summaries
+        setRooms(summaries)
+      })
+      socket.on('room:peer', ({ roomId, peer, kind }) => {
+        // Membership updates for the room we are inside: the tiles follow.
+        setActiveRoom((cur) => {
+          if (!cur || cur.id !== roomId) return cur
+          if (kind === 'joined' && !cur.peers.some((p) => p.id === peer.id)) {
+            return { ...cur, peers: [...cur.peers, peer] }
+          }
+          if (kind === 'left') return { ...cur, peers: cur.peers.filter((p) => p.id !== peer.id) }
+          return cur
+        })
+      })
+      socket.on('room:webrtc', (p) => {
+        // Dispatch to the room view when it is listening; otherwise hold the
+        // packet for the drain when the view mounts.
+        if (signalSinkRef.current) signalSinkRef.current(p)
+        else pendingSignalsRef.current.push(p)
+      })
+      socket.on('connect', () => {
+        // A reconnect hands us a new socket id, and the server has already
+        // dropped the old incarnation: rebuild presence from a fresh join and
+        // re-claim the seat in any room we were holding.
+        const sock = socketRef.current
+        if (!sock || !profileRef.current) return
+        const sim = simRef.current
+        sim.book.peers.clear()
+        sim.renders.clear()
+        sim.self = null
+        joinPresence(sock)
+        const room = activeRoomRef.current
+        if (room) {
+          requestRoomJoin(room.id, () => {
+            // Someone took the seat while we were gone — back to the street.
+            activeRoomRef.current = null
+            setActiveRoom(null)
+          })
+        }
+      })
     }
 
-    socket.emit('presence:join', p, (ack: JoinAck) => {
-      if (!ack.ok) return
-      simRef.current.self = {
-        id: ack.self.id,
-        pos: { x: ack.self.x, y: ack.self.y },
-        render: { x: ack.self.x, y: ack.self.y },
-        moving: false,
-      }
-      simRef.current.cam = { x: ack.self.x, y: ack.self.y }
-      simRef.current.book.peers.clear()
-      simRef.current.renders.clear()
-      for (const peer of ack.peers) {
-        if (peer.id === ack.self.id) continue
-        upsertPeer(simRef.current.book, peer)
-        simRef.current.renders.set(peer.id, { x: peer.x, y: peer.y })
-      }
-    })
+    joinPresence(socket)
+  }, [joinPresence, requestRoomJoin])
+
+  // Door-click entry: one room at a time, the same arbitration path a
+  // reconnect uses.
+  const joinRoomById = useCallback(
+    (roomId: string) => {
+      if (activeRoomRef.current) return
+      requestRoomJoin(roomId)
+    },
+    [requestRoomJoin],
+  )
+
+  const leaveRoomById = useCallback((roomId: string) => {
+    socketRef.current?.emit('room:leave', { roomId })
+    activeRoomRef.current = null
+    setActiveRoom(null)
   }, [])
+
+  // Refusal toasts fade — they mark a moment, not a state.
+  useEffect(() => {
+    if (!toast) return
+    const timer = window.setTimeout(() => setToast(null), 3500)
+    return () => window.clearTimeout(timer)
+  }, [toast])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -138,11 +260,23 @@ export default function WorldCanvas() {
 
     const onClick = (e: MouseEvent): void => {
       const rect = canvas.getBoundingClientRect()
-      const rel = screenToIso({
+      const worldPt = screenToIso({
         x: e.clientX - rect.left - width / 2,
         y: e.clientY - rect.top - height / 2,
       })
-      sim.clickTarget = clampToWorld({ x: rel.x + sim.cam.x, y: rel.y + sim.cam.y })
+      const world = clampToWorld({ x: worldPt.x + sim.cam.x, y: worldPt.y + sim.cam.y })
+      // A click on a door pad is a join request, not a walk target. Refusals
+      // come back on the ack and surface as a toast.
+      const door = doorNear(ROOMS, world)
+      if (door) {
+        if (!door.joinable) {
+          setToast(`${door.name} is a layout stub for now — not open yet.`)
+          return
+        }
+        joinRoomById(door.id)
+        return
+      }
+      sim.clickTarget = world
     }
     canvas.addEventListener('click', onClick)
 
@@ -205,6 +339,14 @@ export default function WorldCanvas() {
         y: sim.cam.y + (camTarget.y - sim.cam.y) * Math.min(1, dt * 4),
       }
 
+      // Huddle zones are doors that follow you: standing inside one raises
+      // the join affordance for that zone's pod.
+      const zone = self ? zoneAt(ROOMS, self.pos) : null
+      if ((zone?.id ?? null) !== sim.zoneId) {
+        sim.zoneId = zone?.id ?? null
+        setZoneOffer(zone?.id ?? null)
+      }
+
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
       const p = profileRef.current
       const selfDraw: AvatarDraw | null =
@@ -224,7 +366,27 @@ export default function WorldCanvas() {
           isSelf: false,
         }
       })
-      drawWorld({ ctx, width, height, cam: sim.cam, time: now, self: selfDraw, peers: peerDraws })
+      // Door pads and labels read the latest summary; positions come from the
+      // static room defs so pads render even before the first snapshot.
+      const summaryById = new Map(roomsRef.current.map((r) => [r.id, r]))
+      const doors: DoorDraw[] = ROOMS.map((def) => {
+        const summary = summaryById.get(def.id)
+        const booking = summary?.booking ?? null
+        return {
+          roomId: def.id,
+          kind: def.kind,
+          x: def.door.x,
+          y: def.door.y,
+          label: def.name,
+          status: summary?.status ?? 'open',
+          occupancy: summary?.occupancy ?? 0,
+          capacity: def.capacity,
+          bookingLabel: booking
+            ? `${booking.live ? 'Now' : 'Next'}: ${booking.title} ${new Date(booking.startsAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+            : null,
+        }
+      })
+      drawWorld({ ctx, width, height, cam: sim.cam, time: now, self: selfDraw, peers: peerDraws, doors })
     }
     raf = requestAnimationFrame(loop)
 
@@ -250,7 +412,9 @@ export default function WorldCanvas() {
       socketRef.current?.disconnect()
       socketRef.current = null
     }
-  }, [])
+    // joinRoomById is a stable useCallback; the sim is a ref. The effect
+    // subscribes once for the lifetime of the component.
+  }, [joinRoomById])
 
   return (
     <div className="relative h-screen w-screen overflow-hidden">
@@ -285,6 +449,93 @@ export default function WorldCanvas() {
           ))}
         </ul>
       </aside>
+
+      {/* Doors read the live summary — open/full with occupancy, reserved with
+          the next booking, or a stub until its slice lands. Clicking a row is
+          a convenience twin of clicking the pad on the canvas. */}
+      <aside
+        data-testid="doors"
+        className="absolute right-4 top-40 z-10 w-60 rounded-xl border border-white/10 bg-slate-900/80 px-4 py-3 text-sm backdrop-blur"
+      >
+        <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">Doors</div>
+        <ul className="mt-2 space-y-1.5">
+          {ROOMS.map((def) => {
+            const summary = rooms.find((r) => r.id === def.id)
+            const status = summary?.status ?? 'open'
+            return (
+              <li key={def.id}>
+                <button
+                  type="button"
+                  data-testid={`door-${def.id}`}
+                  onClick={() => joinRoomById(def.id)}
+                  className="w-full rounded-lg px-2 py-1 text-left hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={!def.joinable || !!activeRoom}
+                >
+                  <span className="flex items-center justify-between gap-2">
+                    <span className="text-slate-100">{def.name}</span>
+                    <span
+                      className={`text-[10px] font-semibold uppercase ${
+                        status === 'full'
+                          ? 'text-rose-300'
+                          : status === 'reserved'
+                            ? 'text-amber-300'
+                            : 'text-emerald-300'
+                      }`}
+                    >
+                      {status} {summary ? `${summary.occupancy}/${def.capacity}` : `0/${def.capacity}`}
+                    </span>
+                  </span>
+                  {summary?.booking ? (
+                    <span className="block text-[10px] text-amber-200/80">
+                      {summary.booking.live ? 'Now' : 'Next'}: {summary.booking.title} ·{' '}
+                      {new Date(summary.booking.startsAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                  ) : null}
+                </button>
+              </li>
+            )
+          })}
+        </ul>
+      </aside>
+
+      {/* Huddle zones are doors that follow you — a chip, not a fixed place. */}
+      {zoneOffer && !activeRoom ? (
+        <div
+          data-testid="zone-offer"
+          className="absolute bottom-6 left-1/2 z-20 flex -translate-x-1/2 items-center gap-3 rounded-full border border-emerald-400/40 bg-slate-900/90 px-4 py-2 text-sm text-slate-100 shadow-lg"
+        >
+          <span>Huddle zone — join {ROOMS.find((r) => r.id === zoneOffer)?.name}?</span>
+          <button
+            type="button"
+            data-testid="zone-join"
+            onClick={() => joinRoomById(zoneOffer)}
+            className="rounded-full bg-emerald-500 px-3 py-1 text-xs font-semibold text-slate-950 hover:bg-emerald-400"
+          >
+            Join
+          </button>
+        </div>
+      ) : null}
+
+      {toast ? (
+        <div
+          data-testid="door-toast"
+          role="status"
+          className="absolute left-1/2 top-16 z-40 -translate-x-1/2 rounded-lg border border-rose-400/40 bg-slate-900/95 px-4 py-2 text-sm text-rose-100 shadow-lg"
+        >
+          {toast}
+        </div>
+      ) : null}
+
+      {activeRoom && socketRef.current ? (
+        <RoomView
+          socket={socketRef.current}
+          selfName={profile?.name ?? ''}
+          room={activeRoom}
+          onLeave={() => leaveRoomById(activeRoom.id)}
+          signalSink={signalSinkRef}
+          pendingSignals={pendingSignalsRef}
+        />
+      ) : null}
 
       {!profile && <JoinPanel onJoin={handleJoin} />}
     </div>
