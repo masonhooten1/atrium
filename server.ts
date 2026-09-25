@@ -1,6 +1,7 @@
 import { createServer } from 'node:http'
 import { parse } from 'node:url'
 import next from 'next'
+import { loadEnvConfig } from '@next/env'
 import { Server as SocketServer } from 'socket.io'
 import { SPAWN } from './src/lib/world'
 import { acceptMove, joinPeer, newPeerBook, removePeer, snapshot, teleportPeer, upsertPeer } from './src/lib/presence'
@@ -50,6 +51,14 @@ const inviteBook = newInviteBook()
 let spawnedPods = 0
 
 async function main() {
+  // The first Prisma query below runs before Next's own env loading (which
+  // happens inside the next() app init), so DATABASE_URL from a repo-root
+  // .env would be invisible to it — a fresh clone following the README
+  // crashes on boot. @next/env is Next's documented loader for custom
+  // servers; NODE_ENV picks the right file. CI sets the var explicitly, so
+  // this is a no-op there.
+  loadEnvConfig(process.cwd())
+
   const db = getDb()
   // Static rooms get their rows before the first socket connects: strokes
   // and bookings reference them, and SQLite enforces the foreign keys. The
