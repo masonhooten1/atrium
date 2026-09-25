@@ -3,8 +3,9 @@
 import { useEffect, useState } from 'react'
 import { AVATAR_COLORS, HAT_IDS, type AvatarProfile, type HatId } from '@/lib/avatar-presets'
 
-// Lightweight identity picker for the world shell. The full guided onboarding
-// walk is its own slice — this just gets a named, styled avatar onto the street.
+// Step one of onboarding: the identity picker. It gets a named, styled
+// avatar onto the street; the guided walk (WorldCanvas + lib/onboarding)
+// then teaches movement on the way to the hall.
 export default function JoinPanel({ onJoin }: { onJoin: (p: AvatarProfile) => void }) {
   const [name, setName] = useState('')
   const [color, setColor] = useState<string>(AVATAR_COLORS[3])
