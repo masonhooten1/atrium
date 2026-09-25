@@ -29,6 +29,17 @@ export function snapshot(book: PeerBook): PeerInfo[] {
   return [...book.peers.values()]
 }
 
+// Server-authoritative teleport (the grab gesture's accept): the server moves
+// the avatar and the client renders — the same clamp as every other move.
+export function teleportPeer(book: PeerBook, id: string, pos: { x: number; y: number }): PeerInfo | null {
+  const peer = book.peers.get(id)
+  if (!peer) return null
+  const clamped = clampToWorld(pos)
+  peer.x = clamped.x
+  peer.y = clamped.y
+  return peer
+}
+
 // Merge a full snapshot from the server (used by clients on connect).
 export function replaceAll(book: PeerBook, peers: PeerInfo[]): void {
   book.peers = new Map(peers.map((p) => [p.id, p]))

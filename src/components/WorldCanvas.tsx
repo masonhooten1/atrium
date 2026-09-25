@@ -7,8 +7,8 @@ import RoomView, { type ActiveRoom } from './RoomView'
 import { drawWorld, screenDirToWorldDir, screenToIso, type AvatarDraw, type DoorDraw } from './world/renderer'
 import { clampToWorld, SPAWN, stepToward, type Vec2 } from '@/lib/world'
 import { removePeer, snapshot, upsertPeer, newPeerBook, type PeerBook } from '@/lib/presence'
-import { doorNear, zoneAt, ROOMS } from '@/lib/rooms'
-import type { JoinAck, RoomJoinAck, RoomSummary, WebRTCPacket } from '@/lib/protocol'
+import { doorNear, peerNear, zoneAt, ROOMS } from '@/lib/rooms'
+import type { JoinAck, PodInviteAck, PodInviteOutcome, RoomJoinAck, RoomSummary, WebRTCPacket } from '@/lib/protocol'
 import type { AvatarProfile } from '@/lib/avatar-presets'
 
 const SPEED = 3.5 // world tiles per second
@@ -54,6 +54,13 @@ export default function WorldCanvas() {
   const [activeRoom, setActiveRoom] = useState<ActiveRoom | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   const [zoneOffer, setZoneOffer] = useState<string | null>(null)
+  // Grab-gesture surface: an incoming invite to answer and our own invite
+  // awaiting an answer. Refs mirror both for the socket handlers, which are
+  // registered once and would otherwise read stale state.
+  const [incoming, setIncoming] = useState<{ inviteId: string; fromName: string } | null>(null)
+  const [pendingInvite, setPendingInvite] = useState<{ inviteId: string; targetName: string } | null>(null)
+  const incomingRef = useRef<{ inviteId: string; fromName: string } | null>(null)
+  const pendingInviteRef = useRef<{ inviteId: string; targetName: string } | null>(null)
   // Refs mirror the state the canvas loop and socket callbacks read without
   // re-subscribing: door summaries, and the room we are currently inside.
   const roomsRef = useRef<RoomSummary[]>([])
@@ -122,6 +129,29 @@ export default function WorldCanvas() {
     })
   }, [])
 
+  // Send the grab gesture: invite a nearby avatar into a fresh pod. The ack
+  // is the truth about why nothing happened — refusals surface as toasts,
+  // never silence.
+  const invitePeer = useCallback((targetId: string, targetName: string) => {
+    socketRef.current?.emit('pod:invite', { targetId }, (ack: PodInviteAck) => {
+      if (!ack.ok) {
+        setToast(
+          ack.reason === 'range'
+            ? `Walk closer to ${targetName} to grab a pod.`
+            : ack.reason === 'outstanding'
+              ? 'You already have a pod invite out.'
+              : ack.reason === 'busy'
+                ? `${targetName} is in a room right now.`
+                : `${targetName} is not on the street right now.`,
+        )
+        return
+      }
+      const pending = { inviteId: ack.inviteId, targetName }
+      pendingInviteRef.current = pending
+      setPendingInvite(pending)
+    })
+  }, [])
+
   const handleJoin = useCallback((p: AvatarProfile) => {
     profileRef.current = p
     setProfile(p)
@@ -175,6 +205,37 @@ export default function WorldCanvas() {
         // packet for the drain when the view mounts.
         if (signalSinkRef.current) signalSinkRef.current(p)
         else pendingSignalsRef.current.push(p)
+      })
+      socket.on('pod:incoming', ({ inviteId, from }) => {
+        const next = { inviteId, fromName: from.name }
+        incomingRef.current = next
+        setIncoming(next)
+      })
+      socket.on('pod:resolved', ({ inviteId, outcome, pod }) => {
+        // Capture who this was about before clearing — the toast names the no.
+        // (Only the inviter ever sees 'declined'; the target is the decliner.)
+        const pending = pendingInviteRef.current
+        const pendingName = pending && pending.inviteId === inviteId ? pending.targetName : null
+        incomingRef.current = null
+        setIncoming(null)
+        pendingInviteRef.current = null
+        setPendingInvite(null)
+        if (outcome === 'accepted' && pod) {
+          // The server teleported us: snap our avatar to the pod and open the
+          // room through the same seat-claiming path as a door.
+          const sim = simRef.current
+          if (sim.self) {
+            sim.self.pos = { ...pod.pos }
+            sim.self.render = { ...pod.pos }
+            sim.clickTarget = null
+          }
+          requestRoomJoin(pod.roomId)
+          return
+        }
+        // Nothing materializes on a no: name the no so it is not silence.
+        if (outcome === 'declined') setToast(`${pendingName ?? 'They'} declined the pod invite.`)
+        else if (outcome === 'expired') setToast('The pod invite expired — nothing was opened.')
+        else if (outcome === 'unavailable') setToast('The pod invite fell through — someone stepped into a room.')
       })
       socket.on('connect', () => {
         // A reconnect hands us a new socket id, and the server has already
@@ -274,6 +335,21 @@ export default function WorldCanvas() {
           return
         }
         joinRoomById(door.id)
+        return
+      }
+      // Clicking an avatar is the grab gesture: invite them into a fresh pod.
+      // Picking runs on the eased render positions — what is actually drawn —
+      // while the server re-checks range against authoritative positions.
+      const hit = peerNear(
+        snapshot(sim.book).map((info) => {
+          const r = sim.renders.get(info.id) ?? { x: info.x, y: info.y }
+          return { id: info.id, name: info.name, x: r.x, y: r.y }
+        }),
+        world,
+      )
+      if (hit) {
+        if (activeRoomRef.current) return
+        invitePeer(hit.id, hit.name)
         return
       }
       sim.clickTarget = world
@@ -386,6 +462,22 @@ export default function WorldCanvas() {
             : null,
         }
       })
+      // Spawned pods materialize on the street: a booth and pad at their
+      // landing spot, rendered from the summary like any other door.
+      for (const s of roomsRef.current) {
+        if (!s.door || ROOMS.some((def) => def.id === s.id)) continue
+        doors.push({
+          roomId: s.id,
+          kind: s.kind,
+          x: s.door.x,
+          y: s.door.y,
+          label: s.name,
+          status: s.status,
+          occupancy: s.occupancy,
+          capacity: s.capacity,
+          bookingLabel: null,
+        })
+      }
       drawWorld({ ctx, width, height, cam: sim.cam, time: now, self: selfDraw, peers: peerDraws, doors })
     }
     raf = requestAnimationFrame(loop)
@@ -412,9 +504,18 @@ export default function WorldCanvas() {
       socketRef.current?.disconnect()
       socketRef.current = null
     }
-    // joinRoomById is a stable useCallback; the sim is a ref. The effect
-    // subscribes once for the lifetime of the component.
-  }, [joinRoomById])
+    // joinRoomById and invitePeer are stable useCallbacks; the sim is a ref.
+    // The effect subscribes once for the lifetime of the component.
+  }, [joinRoomById, invitePeer])
+
+  // The doors panel: static rooms plus any pod the grab gesture spawned —
+  // spawned rows ride their summary (name, capacity, joinable) while alive.
+  const doorRows = [
+    ...ROOMS.map((def) => ({ id: def.id, name: def.name, capacity: def.capacity, joinable: def.joinable })),
+    ...rooms
+      .filter((r) => r.door && !ROOMS.some((def) => def.id === r.id))
+      .map((r) => ({ id: r.id, name: r.name, capacity: r.capacity, joinable: r.joinable })),
+  ]
 
   return (
     <div className="relative h-screen w-screen overflow-hidden">
@@ -459,20 +560,20 @@ export default function WorldCanvas() {
       >
         <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">Doors</div>
         <ul className="mt-2 space-y-1.5">
-          {ROOMS.map((def) => {
-            const summary = rooms.find((r) => r.id === def.id)
+          {doorRows.map((row) => {
+            const summary = rooms.find((r) => r.id === row.id)
             const status = summary?.status ?? 'open'
             return (
-              <li key={def.id}>
+              <li key={row.id}>
                 <button
                   type="button"
-                  data-testid={`door-${def.id}`}
-                  onClick={() => joinRoomById(def.id)}
+                  data-testid={`door-${row.id}`}
+                  onClick={() => joinRoomById(row.id)}
                   className="w-full rounded-lg px-2 py-1 text-left hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50"
-                  disabled={!def.joinable || !!activeRoom}
+                  disabled={!row.joinable || !!activeRoom}
                 >
                   <span className="flex items-center justify-between gap-2">
-                    <span className="text-slate-100">{def.name}</span>
+                    <span className="text-slate-100">{row.name}</span>
                     <span
                       className={`text-[10px] font-semibold uppercase ${
                         status === 'full'
@@ -482,7 +583,7 @@ export default function WorldCanvas() {
                             : 'text-emerald-300'
                       }`}
                     >
-                      {status} {summary ? `${summary.occupancy}/${def.capacity}` : `0/${def.capacity}`}
+                      {status} {summary ? `${summary.occupancy}/${row.capacity}` : `0/${row.capacity}`}
                     </span>
                   </span>
                   {summary?.booking ? (
@@ -513,6 +614,67 @@ export default function WorldCanvas() {
           >
             Join
           </button>
+        </div>
+      ) : null}
+
+      {/* The grab gesture's two chips: an invite to answer, and our own invite
+          awaiting an answer. Neither materializes anything on its own. */}
+      {incoming && !activeRoom ? (
+        <div
+          data-testid="pod-incoming"
+          className="absolute bottom-24 left-1/2 z-30 flex -translate-x-1/2 items-center gap-3 rounded-full border border-sky-400/40 bg-slate-900/90 px-4 py-2 text-sm text-slate-100 shadow-lg"
+        >
+          <span>{incoming.fromName} wants to grab a pod with you</span>
+          <button
+            type="button"
+            data-testid="pod-accept"
+            onClick={() => {
+              const inviteId = incoming.inviteId
+              incomingRef.current = null
+              setIncoming(null)
+              socketRef.current?.emit(
+                'pod:invite:respond',
+                { inviteId, accept: true },
+                (ack: { ok: true; outcome: PodInviteOutcome } | { ok: false; reason: 'unknown' | 'not-target' }) => {
+                  if (!ack.ok) setToast('That pod invite is no longer there.')
+                },
+              )
+            }}
+            className="rounded-full bg-sky-500 px-3 py-1 text-xs font-semibold text-slate-950 hover:bg-sky-400"
+          >
+            Accept
+          </button>
+          <button
+            type="button"
+            data-testid="pod-decline"
+            onClick={() => {
+              const inviteId = incoming.inviteId
+              incomingRef.current = null
+              setIncoming(null)
+              // The ack is not decoration: the server refuses unacked
+              // responds outright, so a bare emit would leave the inviter
+              // waiting out the full 30 s expiry on a no that already
+              // happened.
+              socketRef.current?.emit(
+                'pod:invite:respond',
+                { inviteId, accept: false },
+                (ack: { ok: true; outcome: PodInviteOutcome } | { ok: false; reason: 'unknown' | 'not-target' }) => {
+                  if (!ack.ok) setToast('That pod invite is no longer there.')
+                },
+              )
+            }}
+            className="rounded-full border border-slate-500 px-3 py-1 text-xs font-semibold text-slate-200 hover:bg-white/5"
+          >
+            Decline
+          </button>
+        </div>
+      ) : null}
+      {pendingInvite && !activeRoom ? (
+        <div
+          data-testid="pod-pending"
+          className="absolute bottom-40 left-1/2 z-20 -translate-x-1/2 rounded-full border border-white/10 bg-slate-900/80 px-4 py-2 text-sm text-slate-300 shadow-lg"
+        >
+          Waiting for {pendingInvite.targetName} to answer…
         </div>
       ) : null}
 

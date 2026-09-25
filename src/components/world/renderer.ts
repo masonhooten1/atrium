@@ -119,11 +119,13 @@ export function drawWorld({ ctx, width, height, cam, time, self, peers, doors }:
     worldObjects.push({ depth: prop.x + prop.y, draw: () => drawProp(ctx, prop, toScreen, time) })
   }
   // Phone booths for the pods — small glass boxes beside their door pads.
-  for (const def of ROOMS) {
-    if (def.kind !== 'pod') continue
+  // Static pods sit at their def's door; spawned pods materialize at the
+  // landing spot their summary reports.
+  const staticRoomIds = new Set(ROOMS.map((d) => d.id))
+  const addPodBooth = (at: Vec2): void => {
     const booth: Building = {
-      x: def.door.x - 0.45,
-      y: def.door.y - 1.2,
+      x: at.x - 0.45,
+      y: at.y - 1.2,
       w: 0.9,
       d: 0.9,
       h: 1.7,
@@ -131,6 +133,13 @@ export function drawWorld({ ctx, width, height, cam, time, self, peers, doors }:
       trim: '#232f4a',
     }
     worldObjects.push({ depth: booth.x + booth.w + booth.y + booth.d, draw: () => drawBuilding(ctx, booth, toScreen, time) })
+  }
+  for (const def of ROOMS) {
+    if (def.kind === 'pod') addPodBooth(def.door)
+  }
+  for (const door of doors) {
+    if (door.kind !== 'pod' || staticRoomIds.has(door.roomId)) continue
+    addPodBooth({ x: door.x, y: door.y })
   }
   worldObjects.sort((m, n) => m.depth - n.depth)
   for (const d of worldObjects) d.draw()
@@ -567,6 +576,12 @@ function drawRoomGround(
     }
     drawDoorPad(ctx, door, toScreen, time)
     if (door.kind === 'boardroom') drawBoardroomPortal(ctx, door, toScreen, time)
+  }
+  // Spawned pods have no static def — their pads ride the doors list.
+  const staticRoomIds = new Set(ROOMS.map((d) => d.id))
+  for (const door of doors) {
+    if (staticRoomIds.has(door.roomId)) continue
+    drawDoorPad(ctx, door, toScreen, time)
   }
 }
 

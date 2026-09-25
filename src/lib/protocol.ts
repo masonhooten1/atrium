@@ -40,6 +40,8 @@ export interface RoomSummary {
   joinable: boolean
   dynamic: boolean
   booking: RoomBookingInfo | null
+  // Present only for spawned pods — static door positions live in the defs.
+  door?: { x: number; y: number }
 }
 
 export type RoomJoinAck =
@@ -50,6 +52,26 @@ export type RoomJoinAck =
       peers: PeerInfo[]
     }
   | { ok: false; reason: RoomRefusal }
+
+// --- Grab gesture ------------------------------------------------------------
+
+// Outcomes of a pod invite: accepted (pod spawned, both teleported inside),
+// declined, expired (30 s silence), or unavailable (someone stepped into a
+// room before the answer landed). Nothing materializes on any outcome but
+// accepted.
+export type PodInviteOutcome = 'accepted' | 'declined' | 'expired' | 'unavailable'
+
+// Where the spawned pod landed: both parties teleport here and every street
+// client renders the booth at this spot.
+export interface PodSpawnInfo {
+  roomId: string
+  name: string
+  pos: { x: number; y: number }
+}
+
+export type PodInviteAck =
+  | { ok: true; inviteId: string }
+  | { ok: false; reason: 'self' | 'range' | 'outstanding' | 'busy' | 'unknown-peer' }
 
 // WebRTC relay envelope: session descriptions and ICE candidates ride the
 // same event; the server forwards unopened, but only between sockets that
@@ -69,6 +91,8 @@ export interface ServerToClientEvents {
   'room:peer': (p: { roomId: string; peer: PeerInfo; kind: 'joined' | 'left' }) => void
   'room:webrtc': (p: { signal: RTCSignal; from: string }) => void
   'room:share': (p: { roomId: string; peerId: string; sharing: boolean }) => void
+  'pod:incoming': (p: { inviteId: string; from: PeerInfo }) => void
+  'pod:resolved': (p: { inviteId: string; outcome: PodInviteOutcome; pod: PodSpawnInfo | null }) => void
 }
 
 export interface ClientToServerEvents {
@@ -78,4 +102,9 @@ export interface ClientToServerEvents {
   'room:leave': (p: { roomId: string }) => void
   'room:webrtc': (p: { signal: RTCSignal; to: string }) => void
   'room:share': (p: { roomId: string; sharing: boolean }) => void
+  'pod:invite': (p: { targetId: string }, ack: (r: PodInviteAck) => void) => void
+  'pod:invite:respond': (
+    p: { inviteId: string; accept: boolean },
+    ack: (r: { ok: true; outcome: PodInviteOutcome } | { ok: false; reason: 'unknown' | 'not-target' }) => void,
+  ) => void
 }

@@ -86,6 +86,24 @@ export function leaveAllRooms(book: RoomBook, peerId: string): string[] {
   return left
 }
 
+// Register a spawned pod (the grab gesture's accept): the book is the only
+// registry, and the def carries isSpawned so summaries can render it on the
+// street. The def's dynamic flag drives the dissolve-when-empty lifecycle.
+export function spawnRoom(book: RoomBook, def: RoomDef): RoomState {
+  const state: RoomState = { def, occupants: new Map(), booking: null }
+  book.rooms.set(def.id, state)
+  return state
+}
+
+// Is the peer currently holding a seat anywhere? The grab gesture never pulls
+// someone out of (or into) a meeting they are already in.
+export function occupiesAnyRoom(book: RoomBook, peerId: string): boolean {
+  for (const state of book.rooms.values()) {
+    if (state.occupants.has(peerId)) return true
+  }
+  return false
+}
+
 // The one room (if any) both sockets currently share — the WebRTC relay only
 // forwards signaling between sockets that sit in the same room.
 export function sharedRoom(book: RoomBook, a: string, b: string): string | null {
@@ -129,7 +147,8 @@ export function doorView(state: RoomState | null, def: RoomDef, now: number): Do
 }
 
 // Full door-state snapshot for the room:summary broadcast. Static rooms always
-// appear; huddle zones appear with zero occupancy until their pod spawns.
+// appear; huddle zones appear with zero occupancy until their pod spawns; and
+// spawned pods (the grab gesture) appear with their landing spot while alive.
 export function roomSummaries(book: RoomBook, now: number): RoomSummaryData[] {
   const out: RoomSummaryData[] = []
   for (const def of ROOMS) {
@@ -147,6 +166,22 @@ export function roomSummaries(book: RoomBook, now: number): RoomSummaryData[] {
       booking: view.booking,
     })
   }
+  for (const state of book.rooms.values()) {
+    if (!state.def.isSpawned) continue
+    const view = doorView(state, state.def, now)
+    out.push({
+      id: state.def.id,
+      kind: state.def.kind,
+      name: state.def.name,
+      capacity: state.def.capacity,
+      occupancy: view.occupancy,
+      status: view.status,
+      joinable: state.def.joinable,
+      dynamic: state.def.dynamic,
+      booking: view.booking,
+      door: { x: state.def.door.x, y: state.def.door.y },
+    })
+  }
   return out
 }
 
@@ -162,4 +197,7 @@ export interface RoomSummaryData {
   joinable: boolean
   dynamic: boolean
   booking: { title: string; startsAt: number; live: boolean } | null
+  // Landing spot on the street — present only for spawned pods; static door
+  // positions are known from the defs.
+  door?: { x: number; y: number }
 }
