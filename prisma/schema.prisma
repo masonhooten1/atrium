@@ -39,6 +39,9 @@ model Booking {
   roomId    String
   room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
   title     String
+  // Display name of whoever booked — the prototype is single-tenant and
+  // unauthenticated, so the booker is a label, not an identity.
+  booker    String
   startsAt  DateTime
   endsAt    DateTime
   createdAt DateTime @default(now())

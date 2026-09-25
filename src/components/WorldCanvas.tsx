@@ -11,6 +11,9 @@ import { doorNear, peerNear, zoneAt, ROOMS } from '@/lib/rooms'
 import type { JoinAck, PodInviteAck, PodInviteOutcome, RoomJoinAck, RoomSummary, WebRTCPacket } from '@/lib/protocol'
 import type { StrokeData } from '@/lib/whiteboard'
 import type { AvatarProfile } from '@/lib/avatar-presets'
+import BookingForm from '@/components/BookingForm'
+
+const BOARDROOM_ID = ROOMS.find((r) => r.kind === 'boardroom')?.id ?? ''
 
 const SPEED = 3.5 // world tiles per second
 const MOVE_SEND_MS = 1000 / 15 // client-side send throttle, ~15 Hz
@@ -563,12 +566,13 @@ export default function WorldCanvas() {
         </ul>
       </aside>
 
-      {/* Doors read the live summary — open/full with occupancy, reserved with
-          the next booking, or a stub until its slice lands. Clicking a row is
-          a convenience twin of clicking the pad on the canvas. */}
+      {/* Doors and the booking desk share one column: the doors read the
+          live summary — open/full with occupancy, reserved with the next
+          booking — and the boardroom's form books its future. */}
+      <div className="absolute right-4 top-40 z-10 flex w-60 flex-col gap-3">
       <aside
         data-testid="doors"
-        className="absolute right-4 top-40 z-10 w-60 rounded-xl border border-white/10 bg-slate-900/80 px-4 py-3 text-sm backdrop-blur"
+        className="rounded-xl border border-white/10 bg-slate-900/80 px-4 py-3 text-sm backdrop-blur"
       >
         <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">Doors</div>
         <ul className="mt-2 space-y-1.5">
@@ -610,6 +614,8 @@ export default function WorldCanvas() {
           })}
         </ul>
       </aside>
+      {profile && BOARDROOM_ID ? <BookingForm roomId={BOARDROOM_ID} booker={profile.name} /> : null}
+      </div>
 
       {/* Huddle zones are doors that follow you — a chip, not a fixed place. */}
       {zoneOffer && !activeRoom ? (

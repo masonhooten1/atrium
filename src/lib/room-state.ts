@@ -60,7 +60,6 @@ export function joinRoom(book: RoomBook, roomId: string, peerId: string, now: nu
   if (existing !== undefined) return { ok: true, seat: existing }
   if (state.booking && now < state.booking.startsAt) return { ok: false, reason: 'reserved' }
   if (state.occupants.size >= def.capacity) return { ok: false, reason: 'full' }
-
   const seat = lowestFreeSeat(state.occupants, def.capacity)
   if (seat < 0) return { ok: false, reason: 'full' }
   state.occupants.set(peerId, seat)
@@ -93,6 +92,21 @@ export function spawnRoom(book: RoomBook, def: RoomDef): RoomState {
   const state: RoomState = { def, occupants: new Map(), booking: null }
   book.rooms.set(def.id, state)
   return state
+}
+
+// Adopt a booking from the durable store (boot hydration or a fresh API
+// create). Bookings bind to static street rooms only — dynamic huddle pods
+// and spawned grab-pods are never bookable, and unknown ids decline.
+export function applyBooking(book: RoomBook, roomId: string, booking: RoomBooking | null): boolean {
+  const state = book.rooms.get(roomId)
+  if (state) {
+    state.booking = booking
+    return true
+  }
+  const def = findRoomDef(ROOMS, roomId)
+  if (!def || def.dynamic || !def.joinable) return false
+  book.rooms.set(roomId, { def, occupants: new Map(), booking })
+  return true
 }
 
 // Is the peer currently holding a seat anywhere? The grab gesture never pulls
@@ -132,16 +146,17 @@ export interface DoorView {
   booking: { title: string; startsAt: number; live: boolean } | null
 }
 
-// Precedence: stub > reserved (upcoming booking holds the room) > full > open.
+// Precedence: stub > reserved (a booking in force) > full > open. A live
+// booking reads as "in session" — the door shows reserved even though joins
+// inside the window are still accepted; an upcoming one holds the room.
 export function doorView(state: RoomState | null, def: RoomDef, now: number): DoorView {
   if (!def.joinable) return { status: 'stub', occupancy: 0, booking: null }
   const occupancy = state ? state.occupants.size : 0
   const booking = state?.booking ?? null
   if (booking && now < booking.endsAt) {
     const info = { title: booking.title, startsAt: booking.startsAt, live: now >= booking.startsAt }
-    if (now < booking.startsAt) return { status: 'reserved', occupancy, booking: info }
     if (occupancy >= def.capacity) return { status: 'full', occupancy, booking: info }
-    return { status: 'open', occupancy, booking: info }
+    return { status: 'reserved', occupancy, booking: info }
   }
   return { status: occupancy >= def.capacity ? 'full' : 'open', occupancy, booking: null }
 }

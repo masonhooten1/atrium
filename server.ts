@@ -17,7 +17,7 @@ import { createInvite, cancelInvitesInvolving, newInviteBook, respondInvite, swe
 import { podSpawnPos } from './src/lib/rooms'
 import { getDb } from './src/lib/db'
 import { bindIo, broadcastSummaries, getRoomBook } from './src/lib/server/runtime'
-import { appendStroke, ensureRoomRows, listStrokes } from './src/lib/server/store'
+import { appendStroke, ensureRoomRows, hydrateBookingsInto, listStrokes } from './src/lib/server/store'
 import { sanitizeStroke } from './src/lib/whiteboard'
 import type { ClientToServerEvents, PodInviteOutcome, PodSpawnInfo, ServerToClientEvents } from './src/lib/protocol'
 import type { RoomDef } from './src/lib/rooms'
@@ -52,8 +52,11 @@ let spawnedPods = 0
 async function main() {
   const db = getDb()
   // Static rooms get their rows before the first socket connects: strokes
-  // and bookings reference them, and SQLite enforces the foreign keys.
+  // and bookings reference them, and SQLite enforces the foreign keys. The
+  // doors then open already telling the future — bookings made before the
+  // server ever ran are waiting on them.
   await ensureRoomRows(db)
+  await hydrateBookingsInto(roomBook, db, Date.now())
 
   const app = next({ dev })
   const handle = app.getRequestHandler()

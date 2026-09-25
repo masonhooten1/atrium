@@ -3,6 +3,9 @@
 // database; callers all share the getDb() singleton.
 import type { PrismaClient } from '@prisma/client'
 import { ROOMS } from '../rooms'
+import type { RoomBook, RoomBooking } from '../room-state'
+import { applyBooking } from '../room-state'
+import { nextBookingFrom } from '../bookings'
 import { sanitizeStroke, type StrokeData } from '../whiteboard'
 
 // History bound: at most the most recent strokes come back per room join.
@@ -49,4 +52,24 @@ export async function listStrokes(db: PrismaClient, roomId: string): Promise<Str
 // updates live on the wire, never in the table.
 export async function appendStroke(db: PrismaClient, roomId: string, stroke: StrokeData): Promise<void> {
   await db.whiteboardStroke.create({ data: { roomId, data: JSON.stringify(stroke) } })
+}
+
+// Boot hydration: the doors must open already telling the future. Loads every
+// in-force booking and adopts the next one (live beats upcoming, earliest
+// first) into the room book.
+export async function hydrateBookingsInto(book: RoomBook, db: PrismaClient, now: number): Promise<void> {
+  const rows = await db.booking.findMany({
+    where: { endsAt: { gt: new Date(now) } },
+    orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
+  })
+  const byRoom = new Map<string, RoomBooking[]>()
+  for (const row of rows) {
+    const list = byRoom.get(row.roomId) ?? []
+    list.push({ title: row.title, startsAt: row.startsAt.getTime(), endsAt: row.endsAt.getTime() })
+    byRoom.set(row.roomId, list)
+  }
+  for (const [roomId, bookings] of byRoom) {
+    const next = nextBookingFrom(bookings, now)
+    if (next) applyBooking(book, roomId, { title: next.title, startsAt: next.startsAt, endsAt: next.endsAt })
+  }
 }
