@@ -147,7 +147,8 @@ export function doorView(state: RoomState | null, def: RoomDef, now: number): Do
 }
 
 // Full door-state snapshot for the room:summary broadcast. Static rooms always
-// appear; huddle zones appear with zero occupancy until their pod spawns.
+// appear; huddle zones appear with zero occupancy until their pod spawns; and
+// spawned pods (the grab gesture) appear with their landing spot while alive.
 export function roomSummaries(book: RoomBook, now: number): RoomSummaryData[] {
   const out: RoomSummaryData[] = []
   for (const def of ROOMS) {
@@ -165,6 +166,22 @@ export function roomSummaries(book: RoomBook, now: number): RoomSummaryData[] {
       booking: view.booking,
     })
   }
+  for (const state of book.rooms.values()) {
+    if (!state.def.isSpawned) continue
+    const view = doorView(state, state.def, now)
+    out.push({
+      id: state.def.id,
+      kind: state.def.kind,
+      name: state.def.name,
+      capacity: state.def.capacity,
+      occupancy: view.occupancy,
+      status: view.status,
+      joinable: state.def.joinable,
+      dynamic: state.def.dynamic,
+      booking: view.booking,
+      door: { x: state.def.door.x, y: state.def.door.y },
+    })
+  }
   return out
 }
 
@@ -180,4 +197,7 @@ export interface RoomSummaryData {
   joinable: boolean
   dynamic: boolean
   booking: { title: string; startsAt: number; live: boolean } | null
+  // Landing spot on the street — present only for spawned pods; static door
+  // positions are known from the defs.
+  door?: { x: number; y: number }
 }

@@ -462,6 +462,22 @@ export default function WorldCanvas() {
             : null,
         }
       })
+      // Spawned pods materialize on the street: a booth and pad at their
+      // landing spot, rendered from the summary like any other door.
+      for (const s of roomsRef.current) {
+        if (!s.door || ROOMS.some((def) => def.id === s.id)) continue
+        doors.push({
+          roomId: s.id,
+          kind: s.kind,
+          x: s.door.x,
+          y: s.door.y,
+          label: s.name,
+          status: s.status,
+          occupancy: s.occupancy,
+          capacity: s.capacity,
+          bookingLabel: null,
+        })
+      }
       drawWorld({ ctx, width, height, cam: sim.cam, time: now, self: selfDraw, peers: peerDraws, doors })
     }
     raf = requestAnimationFrame(loop)
@@ -491,6 +507,15 @@ export default function WorldCanvas() {
     // joinRoomById and invitePeer are stable useCallbacks; the sim is a ref.
     // The effect subscribes once for the lifetime of the component.
   }, [joinRoomById, invitePeer])
+
+  // The doors panel: static rooms plus any pod the grab gesture spawned —
+  // spawned rows ride their summary (name, capacity, joinable) while alive.
+  const doorRows = [
+    ...ROOMS.map((def) => ({ id: def.id, name: def.name, capacity: def.capacity, joinable: def.joinable })),
+    ...rooms
+      .filter((r) => r.door && !ROOMS.some((def) => def.id === r.id))
+      .map((r) => ({ id: r.id, name: r.name, capacity: r.capacity, joinable: r.joinable })),
+  ]
 
   return (
     <div className="relative h-screen w-screen overflow-hidden">
@@ -535,20 +560,20 @@ export default function WorldCanvas() {
       >
         <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">Doors</div>
         <ul className="mt-2 space-y-1.5">
-          {ROOMS.map((def) => {
-            const summary = rooms.find((r) => r.id === def.id)
+          {doorRows.map((row) => {
+            const summary = rooms.find((r) => r.id === row.id)
             const status = summary?.status ?? 'open'
             return (
-              <li key={def.id}>
+              <li key={row.id}>
                 <button
                   type="button"
-                  data-testid={`door-${def.id}`}
-                  onClick={() => joinRoomById(def.id)}
+                  data-testid={`door-${row.id}`}
+                  onClick={() => joinRoomById(row.id)}
                   className="w-full rounded-lg px-2 py-1 text-left hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50"
-                  disabled={!def.joinable || !!activeRoom}
+                  disabled={!row.joinable || !!activeRoom}
                 >
                   <span className="flex items-center justify-between gap-2">
-                    <span className="text-slate-100">{def.name}</span>
+                    <span className="text-slate-100">{row.name}</span>
                     <span
                       className={`text-[10px] font-semibold uppercase ${
                         status === 'full'
@@ -558,7 +583,7 @@ export default function WorldCanvas() {
                             : 'text-emerald-300'
                       }`}
                     >
-                      {status} {summary ? `${summary.occupancy}/${def.capacity}` : `0/${def.capacity}`}
+                      {status} {summary ? `${summary.occupancy}/${row.capacity}` : `0/${row.capacity}`}
                     </span>
                   </span>
                   {summary?.booking ? (

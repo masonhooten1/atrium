@@ -40,6 +40,8 @@ export interface RoomSummary {
   joinable: boolean
   dynamic: boolean
   booking: RoomBookingInfo | null
+  // Present only for spawned pods — static door positions live in the defs.
+  door?: { x: number; y: number }
 }
 
 export type RoomJoinAck =
