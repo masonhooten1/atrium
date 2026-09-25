@@ -31,15 +31,34 @@ npm run dev            # custom server on http://localhost:3000
 | `npm run build` / `npm run start` | Production build and serve via the custom server |
 | `npm run lint` / `npm run typecheck` | ESLint (flat config) and `tsc --noEmit` |
 | `npm test` | Vitest suite |
-| `npm run test:e2e` | Playwright suite (boots the dev server itself) |
+| `npm run test:e2e` | Playwright suite (builds and boots the production server itself) |
 | `npm run db:migrate` / `npm run db:deploy` | Apply migrations in dev / in CI-like flows |
 | `npm run db:generate` | Regenerate the Prisma client |
+
+## Hosting the demo
+
+The prototype serves itself in production from one process — no external
+services, no keys. For a persistent demo (a VM, a container, or the Obvious
+project sandbox):
+
+```bash
+npm install            # postinstall runs prisma generate
+cp .env.example .env   # DATABASE_URL points at prisma/dev.db
+npx prisma db push     # create or refresh the SQLite schema
+npm run build
+PORT=3000 npm run start
+```
+
+`GET /api/health` returning 200 is the readiness check. One port carries the
+Next app and the Socket.IO realtime layer together, so only that port needs
+exposing — WebRTC media flows peer-to-peer between browsers, never through
+the server. The demo should always serve the latest merged `main`.
 
 ## Layout
 
 ```
 server.ts            custom Node server: HTTP + Socket.IO on one listener
-src/app/             App Router pages and route handlers (/api/health)
+src/app/             App Router pages and route handlers (/api/health, /api/bookings, /api/profile)
 prisma/              schema + migrations (SQLite)
 tests/               Vitest smoke tests
 e2e/                 Playwright specs
