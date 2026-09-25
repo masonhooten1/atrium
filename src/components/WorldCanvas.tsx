@@ -9,6 +9,7 @@ import { clampToWorld, SPAWN, stepToward, type Vec2 } from '@/lib/world'
 import { removePeer, snapshot, upsertPeer, newPeerBook, type PeerBook } from '@/lib/presence'
 import { doorNear, peerNear, zoneAt, ROOMS } from '@/lib/rooms'
 import type { JoinAck, PodInviteAck, PodInviteOutcome, RoomJoinAck, RoomSummary, WebRTCPacket } from '@/lib/protocol'
+import type { StrokeData } from '@/lib/whiteboard'
 import type { AvatarProfile } from '@/lib/avatar-presets'
 
 const SPEED = 3.5 // world tiles per second
@@ -47,6 +48,10 @@ export default function WorldCanvas() {
   // socket.io drops events nobody is listening for.
   const signalSinkRef = useRef<((p: WebRTCPacket) => void) | null>(null)
   const pendingSignalsRef = useRef<WebRTCPacket[]>([])
+  // Whiteboard strokes get the same capture: a room-mate can be drawing the
+  // moment we join, before the room view mounts.
+  const whiteboardSinkRef = useRef<((stroke: StrokeData) => void) | null>(null)
+  const pendingWhiteboardRef = useRef<StrokeData[]>([])
   const [profile, setProfile] = useState<AvatarProfile | null>(null)
   const profileRef = useRef<AvatarProfile | null>(null)
   const [roster, setRoster] = useState<RosterRow[]>([])
@@ -121,8 +126,10 @@ export default function WorldCanvas() {
       activeRoomRef.current = {
         id: ack.room.id,
         name: ack.room.name,
+        kind: ack.room.kind,
         capacity: ack.room.capacity,
         peers: ack.peers,
+        strokes: ack.strokes,
       }
       setActiveRoom(activeRoomRef.current)
       setZoneOffer(null)
@@ -205,6 +212,11 @@ export default function WorldCanvas() {
         // packet for the drain when the view mounts.
         if (signalSinkRef.current) signalSinkRef.current(p)
         else pendingSignalsRef.current.push(p)
+      })
+      socket.on('whiteboard:stroke', ({ roomId, stroke }) => {
+        if (activeRoomRef.current?.id !== roomId) return
+        if (whiteboardSinkRef.current) whiteboardSinkRef.current(stroke)
+        else pendingWhiteboardRef.current.push(stroke)
       })
       socket.on('pod:incoming', ({ inviteId, from }) => {
         const next = { inviteId, fromName: from.name }
@@ -692,10 +704,13 @@ export default function WorldCanvas() {
         <RoomView
           socket={socketRef.current}
           selfName={profile?.name ?? ''}
+          selfColor={profile?.color ?? '#f26d6d'}
           room={activeRoom}
           onLeave={() => leaveRoomById(activeRoom.id)}
           signalSink={signalSinkRef}
           pendingSignals={pendingSignalsRef}
+          whiteboardSink={whiteboardSinkRef}
+          pendingWhiteboard={pendingWhiteboardRef}
         />
       ) : null}
 

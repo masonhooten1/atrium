@@ -3,6 +3,9 @@
 // validated there; clients only render what they receive.
 import type { AvatarProfile, HatId } from './avatar-presets'
 import type { RoomKind } from './rooms'
+import type { StrokeData } from './whiteboard'
+
+export type { StrokeData, StrokePoint } from './whiteboard'
 
 export interface PeerInfo {
   id: string
@@ -50,6 +53,9 @@ export type RoomJoinAck =
       room: { id: string; name: string; kind: RoomKind; capacity: number }
       // Everyone already inside (excluding the joiner), for tile rendering.
       peers: PeerInfo[]
+      // The room's whiteboard history, served atomically with the seat:
+      // new joiners get the batch first, then live stroke events.
+      strokes: StrokeData[]
     }
   | { ok: false; reason: RoomRefusal }
 
@@ -83,6 +89,12 @@ export type RTCSignal =
   | { kind: 'desc'; description: RTCSessionDescriptionInit }
   | { kind: 'ice'; candidate: RTCIceCandidateInit }
 
+// --- Whiteboard --------------------------------------------------------------
+
+// In-room drawing surface (huddle zones and the boardroom). The server
+// validates and persists final strokes, and relays every update to the
+// sender's room-mates — never back to the sender, who renders locally.
+
 export interface ServerToClientEvents {
   'presence:state': (p: { peers: PeerInfo[] }) => void
   'presence:peer': (p: { peer: PeerInfo; kind: 'joined' | 'moved' | 'left' }) => void
@@ -93,6 +105,7 @@ export interface ServerToClientEvents {
   'room:share': (p: { roomId: string; peerId: string; sharing: boolean }) => void
   'pod:incoming': (p: { inviteId: string; from: PeerInfo }) => void
   'pod:resolved': (p: { inviteId: string; outcome: PodInviteOutcome; pod: PodSpawnInfo | null }) => void
+  'whiteboard:stroke': (p: { roomId: string; stroke: StrokeData }) => void
 }
 
 export interface ClientToServerEvents {
@@ -107,4 +120,5 @@ export interface ClientToServerEvents {
     p: { inviteId: string; accept: boolean },
     ack: (r: { ok: true; outcome: PodInviteOutcome } | { ok: false; reason: 'unknown' | 'not-target' }) => void,
   ) => void
+  'whiteboard:stroke': (p: { roomId: string; stroke: StrokeData }) => void
 }

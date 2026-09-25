@@ -7,15 +7,22 @@ import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObjec
 import type { Socket } from 'socket.io-client'
 import { PeerMesh } from '@/lib/mesh'
 import type { ClientToServerEvents, PeerInfo, ServerToClientEvents, WebRTCPacket } from '@/lib/protocol'
+import type { RoomKind } from '@/lib/rooms'
+import type { StrokeData } from '@/lib/whiteboard'
+import Whiteboard from './Whiteboard'
 
 type RoomSocket = Socket<ServerToClientEvents, ClientToServerEvents>
 
 export interface ActiveRoom {
   id: string
   name: string
+  kind: RoomKind
   capacity: number
   // Everyone else currently inside, kept fresh by room:peer events.
   peers: PeerInfo[]
+  // Whiteboard history served with the join ack — the board is full from
+  // the first frame. Live strokes arrive via the sink after mount.
+  strokes: StrokeData[]
 }
 
 interface VideoTileProps {
@@ -59,6 +66,7 @@ function VideoTile({ stream, muted = false, label, testId }: VideoTileProps) {
 export default function RoomView({
   socket,
   selfName,
+  selfColor,
   room,
   onLeave,
   // Signals are captured by WorldCanvas from the moment the socket exists —
@@ -66,13 +74,18 @@ export default function RoomView({
   // dispatched here through the sink once we subscribe.
   signalSink,
   pendingSignals,
+  whiteboardSink,
+  pendingWhiteboard,
 }: {
   socket: RoomSocket
   selfName: string
+  selfColor: string
   room: ActiveRoom
   onLeave: () => void
   signalSink: MutableRefObject<((p: WebRTCPacket) => void) | null>
   pendingSignals: MutableRefObject<WebRTCPacket[]>
+  whiteboardSink: MutableRefObject<((stroke: StrokeData) => void) | null>
+  pendingWhiteboard: MutableRefObject<StrokeData[]>
 }) {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null)
   const [mediaReady, setMediaReady] = useState(false)
@@ -293,6 +306,21 @@ export default function RoomView({
           <span className="absolute right-3 top-3 rounded bg-slate-950/70 px-2 py-1 text-xs text-slate-200">
             Room wall · {wall.label}
           </span>
+        </div>
+      ) : null}
+
+      {/* The whiteboard surface lives in huddle zones and the boardroom —
+          rooms people meet in to make something. Pods are tight booths. */}
+      {room.kind === 'huddle' || room.kind === 'boardroom' ? (
+        <div className="mt-3">
+          <Whiteboard
+            socket={socket}
+            roomId={room.id}
+            selfColor={selfColor}
+            initialStrokes={room.strokes}
+            whiteboardSink={whiteboardSink}
+            pendingWhiteboard={pendingWhiteboard}
+          />
         </div>
       ) : null}
 

@@ -8,15 +8,17 @@ import {
   joinRoom,
   leaveAllRooms,
   leaveRoom,
-  newRoomBook,
   occupiesAnyRoom,
   roomSummaries,
   sharedRoom,
   spawnRoom,
-  sweepBookings,
 } from './src/lib/room-state'
 import { createInvite, cancelInvitesInvolving, newInviteBook, respondInvite, sweepInvites } from './src/lib/invite-state'
 import { podSpawnPos } from './src/lib/rooms'
+import { getDb } from './src/lib/db'
+import { bindIo, broadcastSummaries, getRoomBook } from './src/lib/server/runtime'
+import { appendStroke, ensureRoomRows, listStrokes } from './src/lib/server/store'
+import { sanitizeStroke } from './src/lib/whiteboard'
 import type { ClientToServerEvents, PodInviteOutcome, PodSpawnInfo, ServerToClientEvents } from './src/lib/protocol'
 import type { RoomDef } from './src/lib/rooms'
 
@@ -36,8 +38,10 @@ const book = newPeerBook()
 const dirty = new Set<string>()
 
 // Room occupancy: the server hands out seats and frees them on leave or
-// disconnect — a client can never hold a seat it did not get from here.
-const roomBook = newRoomBook()
+// disconnect — a client can never hold a seat it did not get from here. The
+// book is the process-wide runtime instance so Next API routes (bookings)
+// read and refresh the same world state.
+const roomBook = getRoomBook()
 
 // Grab-gesture invites: one outstanding per inviter, 30 s expiry, and only
 // the server can spawn the pod on a yes. Spawned pods are in-memory like the
@@ -46,6 +50,11 @@ const inviteBook = newInviteBook()
 let spawnedPods = 0
 
 async function main() {
+  const db = getDb()
+  // Static rooms get their rows before the first socket connects: strokes
+  // and bookings reference them, and SQLite enforces the foreign keys.
+  await ensureRoomRows(db)
+
   const app = next({ dev })
   const handle = app.getRequestHandler()
   await app.prepare()
@@ -55,14 +64,7 @@ async function main() {
   })
 
   const io = new SocketServer<ClientToServerEvents, ServerToClientEvents>(httpServer)
-
-  // Door state goes to everyone: any join, leave or disconnect can flip a
-  // door between open, full and reserved.
-  const broadcastSummary = (): void => {
-    const now = Date.now()
-    sweepBookings(roomBook, now)
-    io.emit('room:summary', { rooms: roomSummaries(roomBook, now) })
-  }
+  bindIo(io)
 
   io.on('connection', (socket) => {
     socket.on('presence:join', (profile, ack) => {
@@ -80,7 +82,7 @@ async function main() {
       if (acceptMove(book, socket.id, p)) dirty.add(socket.id)
     })
 
-    socket.on('room:join', (p, ack) => {
+    socket.on('room:join', async (p, ack) => {
       const peer = book.peers.get(socket.id)
       const roomId = typeof p?.roomId === 'string' ? p.roomId : ''
       if (!peer || !ack || !roomId) {
@@ -102,13 +104,17 @@ async function main() {
         .filter((id) => id !== socket.id)
         .map((id) => book.peers.get(id))
         .filter((q) => q !== undefined)
+      // Whiteboard history rides with the seat: the joiner's board is full
+      // from the first frame. Spawned pods have no surface, so no read.
+      const strokes = state.def.isSpawned ? [] : await listStrokes(db, roomId)
       ack({
         ok: true,
         room: { id: roomId, name: state.def.name, kind: state.def.kind, capacity: state.def.capacity },
         peers: occupants,
+        strokes,
       })
       socket.to(`room:${roomId}`).emit('room:peer', { roomId, peer, kind: 'joined' })
-      broadcastSummary()
+      broadcastSummaries()
     })
 
     socket.on('room:leave', (p) => {
@@ -117,7 +123,7 @@ async function main() {
       socket.leave(`room:${roomId}`)
       const peer = book.peers.get(socket.id)
       if (peer) io.to(`room:${roomId}`).emit('room:peer', { roomId, peer, kind: 'left' })
-      broadcastSummary()
+      broadcastSummaries()
     })
 
     socket.on('room:webrtc', (p) => {
@@ -136,6 +142,28 @@ async function main() {
       const state = roomBook.rooms.get(roomId)
       if (!state || !state.occupants.has(socket.id)) return
       io.to(`room:${roomId}`).emit('room:share', { roomId, peerId: socket.id, sharing: Boolean(p.sharing) })
+    })
+
+    socket.on('whiteboard:stroke', async (p) => {
+      const roomId = typeof p?.roomId === 'string' ? p.roomId : ''
+      const state = roomBook.rooms.get(roomId)
+      // Only a seated room-mate can draw, and only in a room with a board —
+      // spawned grab-pods have no whiteboard surface.
+      if (!state || state.def.isSpawned || !state.occupants.has(socket.id)) return
+      const stroke = sanitizeStroke(p.stroke)
+      if (!stroke) return
+      // The final version persists before it is relayed: a fast leave-and-
+      // rejoin must read this stroke from history, never miss it.
+      if (stroke.final) {
+        try {
+          await appendStroke(db, roomId, stroke)
+        } catch (err) {
+          // The room still sees the stroke live; the console says loudly
+          // that this one will not survive a restart.
+          console.error('whiteboard stroke persist failed', err)
+        }
+      }
+      socket.to(`room:${roomId}`).emit('whiteboard:stroke', { roomId, stroke })
     })
 
     socket.on('pod:invite', (p, ack) => {
@@ -232,7 +260,7 @@ async function main() {
       // it, after the resolved event has opened their room view.
       io.to(invite.inviterId).emit('room:peer', { roomId: def.id, peer: target, kind: 'joined' })
       io.to(invite.targetId).emit('room:peer', { roomId: def.id, peer: inviter, kind: 'joined' })
-      broadcastSummary()
+      broadcastSummaries()
     })
 
     socket.on('disconnecting', () => {
@@ -252,7 +280,7 @@ async function main() {
       const left = removePeer(book, socket.id)
       dirty.delete(socket.id)
       if (left) socket.broadcast.emit('presence:peer', { peer: left, kind: 'left' })
-      if (leftRooms.length > 0) broadcastSummary()
+      if (leftRooms.length > 0) broadcastSummaries()
     })
   })
 
