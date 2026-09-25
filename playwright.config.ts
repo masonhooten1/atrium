@@ -11,7 +11,14 @@ export default defineConfig({
     ...devices['Desktop Chrome'],
     baseURL: 'http://localhost:3000',
     launchOptions: {
-      args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'],
+      args: [
+        '--use-fake-device-for-media-stream',
+        '--use-fake-ui-for-media-stream',
+        // Host candidates surface as mDNS .local names by default, which makes
+        // same-machine ICE resolution slow and flaky under headless load —
+        // reveal the real host IPs so mesh e2e connects deterministically.
+        '--disable-features=WebRtcHideLocalIpsForMdns',
+      ],
     },
   },
   webServer: {

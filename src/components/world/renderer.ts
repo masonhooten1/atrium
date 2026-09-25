@@ -2,6 +2,7 @@
 // algorithm (drawables sorted by x+y) and the parallax read comes from a
 // camera-following canvas plus a slower-panning skyline layer.
 import { BUILDINGS, GRID_D, GRID_W, groundAt, PROPS } from '@/lib/world'
+import { ROOMS, type RoomDef, type RoomZone } from '@/lib/rooms'
 import type { Building, Prop } from '@/lib/world'
 import type { HatId } from '@/lib/avatar-presets'
 import type { Vec2 } from '@/lib/world'
@@ -51,9 +52,48 @@ export interface DrawWorldArgs {
   time: number
   self: AvatarDraw | null
   peers: AvatarDraw[]
+  // Live door state per room — what the pads and labels show on the street.
+  doors: DoorDraw[]
 }
 
-export function drawWorld({ ctx, width, height, cam, time, self, peers }: DrawWorldArgs): void {
+// One door's live state, already resolved by the caller from the room summary.
+export interface DoorDraw {
+  roomId: string
+  kind: RoomDef['kind']
+  x: number
+  y: number
+  label: string
+  status: 'open' | 'full' | 'reserved' | 'stub'
+  occupancy: number
+  capacity: number
+  bookingLabel: string | null
+}
+
+const DOOR_COLORS: Record<DoorDraw['status'], string> = {
+  open: '#5cc98f',
+  full: '#f26d6d',
+  reserved: '#e8b44a',
+  stub: '#8a93a8',
+}
+
+const STATE_WORD: Record<DoorDraw['status'], string> = {
+  open: 'OPEN',
+  full: 'FULL',
+  reserved: 'RESERVED',
+  stub: 'STUB',
+}
+
+// Axis-aligned world rect corners in isometric draw order.
+function rectPts(x: number, y: number, w: number, d: number): Vec2[] {
+  return [
+    { x, y },
+    { x: x + w, y },
+    { x: x + w, y: y + d },
+    { x, y: y + d },
+  ]
+}
+
+export function drawWorld({ ctx, width, height, cam, time, self, peers, doors }: DrawWorldArgs): void {
   const cx = width / 2
   const cy = height / 2
   const toScreen: ToScreen = (p) => {
@@ -64,6 +104,7 @@ export function drawWorld({ ctx, width, height, cam, time, self, peers }: DrawWo
   drawSky(ctx, width, height, time)
   drawSkyline(ctx, width, toScreen, cam)
   drawGround(ctx, toScreen)
+  drawRoomGround(ctx, doors, toScreen, time)
 
   const avatars: AvatarDraw[] = [...peers, ...(self ? [self] : [])]
 
@@ -77,6 +118,20 @@ export function drawWorld({ ctx, width, height, cam, time, self, peers }: DrawWo
   for (const prop of PROPS) {
     worldObjects.push({ depth: prop.x + prop.y, draw: () => drawProp(ctx, prop, toScreen, time) })
   }
+  // Phone booths for the pods — small glass boxes beside their door pads.
+  for (const def of ROOMS) {
+    if (def.kind !== 'pod') continue
+    const booth: Building = {
+      x: def.door.x - 0.45,
+      y: def.door.y - 1.2,
+      w: 0.9,
+      d: 0.9,
+      h: 1.7,
+      wall: '#31405f',
+      trim: '#232f4a',
+    }
+    worldObjects.push({ depth: booth.x + booth.w + booth.y + booth.d, draw: () => drawBuilding(ctx, booth, toScreen, time) })
+  }
   worldObjects.sort((m, n) => m.depth - n.depth)
   for (const d of worldObjects) d.draw()
 
@@ -87,6 +142,7 @@ export function drawWorld({ ctx, width, height, cam, time, self, peers }: DrawWo
   ctx.textAlign = 'center'
   ctx.font = '600 12px ui-sans-serif, system-ui, sans-serif'
   for (const a of avatarsSorted) drawLabel(ctx, a, toScreen)
+  for (const door of doors) drawDoorLabel(ctx, door, toScreen)
 }
 
 // --- Shared helpers ----------------------------------------------------------
@@ -479,4 +535,118 @@ function drawLabel(ctx: CanvasRenderingContext2D, a: AvatarDraw, toScreen: ToScr
   ctx.strokeText(a.name, p.x, p.y - 62)
   ctx.fillStyle = a.isSelf ? '#ffffff' : '#e2e8f0'
   ctx.fillText(a.name, p.x, p.y - 62)
+}
+
+// --- Rooms -------------------------------------------------------------------
+
+// Ground-level room furniture: huddle rugs, the amphitheater tiers, and the
+// live door pads. Drawn straight after the ground so avatars walk over them.
+function drawRoomGround(
+  ctx: CanvasRenderingContext2D,
+  doors: DoorDraw[],
+  toScreen: ToScreen,
+  time: number,
+): void {
+  for (const def of ROOMS) {
+    if (def.zone) drawRug(ctx, def.zone, toScreen)
+    if (def.kind === 'stage') drawStageTiers(ctx, toScreen)
+  }
+  const byId = new Map(doors.map((d) => [d.roomId, d]))
+  for (const def of ROOMS) {
+    // Before the first summary arrives, doors render as open and empty.
+    const door = byId.get(def.id) ?? {
+      roomId: def.id,
+      kind: def.kind,
+      x: def.door.x,
+      y: def.door.y,
+      label: def.name,
+      status: 'open' as const,
+      occupancy: 0,
+      capacity: def.capacity,
+      bookingLabel: null,
+    }
+    drawDoorPad(ctx, door, toScreen, time)
+    if (door.kind === 'boardroom') drawBoardroomPortal(ctx, door, toScreen, time)
+  }
+}
+
+function drawRug(ctx: CanvasRenderingContext2D, zone: RoomZone, toScreen: ToScreen): void {
+  poly(ctx, rectPts(zone.x, zone.y, zone.w, zone.d).map(toScreen))
+  ctx.fillStyle = 'rgba(92, 201, 143, 0.14)'
+  ctx.fill()
+  ctx.setLineDash([7, 5])
+  ctx.strokeStyle = 'rgba(92, 201, 143, 0.65)'
+  ctx.lineWidth = 2
+  ctx.stroke()
+  ctx.setLineDash([])
+}
+
+// The amphitheater stub: three tier bands and the stage platform draw only —
+// the layout gesture (bookings, seating) is a later slice.
+function drawStageTiers(ctx: CanvasRenderingContext2D, toScreen: ToScreen): void {
+  const tiers: [number, number, number, number, string][] = [
+    [13.1, 15.9, 3.8, 1.7, '#3b4256'],
+    [13.45, 16.1, 3.1, 1.35, '#404759'],
+    [13.8, 16.3, 2.4, 1.0, '#464e63'],
+  ]
+  for (const [x, y, w, d, color] of tiers) {
+    poly(ctx, rectPts(x, y, w, d).map(toScreen))
+    ctx.fillStyle = color
+    ctx.fill()
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)'
+    ctx.lineWidth = 1
+    ctx.stroke()
+  }
+  // Raised stage platform at the back of the tiers.
+  const platform: Building = { x: 14.1, y: 16.35, w: 1.8, d: 0.9, h: 0.5, wall: '#5a4a33', trim: '#3d3120' }
+  drawBuilding(ctx, platform, toScreen, 0)
+}
+
+function drawDoorPad(ctx: CanvasRenderingContext2D, door: DoorDraw, toScreen: ToScreen, time: number): void {
+  const color = DOOR_COLORS[door.status]
+  const pulse = door.status === 'stub' ? 0.3 : 0.42 + 0.16 * Math.sin(time / 600)
+  poly(ctx, rectPts(door.x - 0.4, door.y - 0.24, 0.8, 0.48).map(toScreen))
+  ctx.globalAlpha = pulse
+  ctx.fillStyle = color
+  ctx.fill()
+  ctx.globalAlpha = 1
+  ctx.strokeStyle = color
+  ctx.lineWidth = 1.5
+  ctx.stroke()
+}
+
+// The boardroom door on the hall: a freestanding portal frame over its pad.
+function drawBoardroomPortal(ctx: CanvasRenderingContext2D, door: DoorDraw, toScreen: ToScreen, time: number): void {
+  const color = DOOR_COLORS[door.status]
+  const base = toScreen({ x: door.x, y: door.y })
+  const glow = 0.5 + 0.2 * Math.sin(time / 700)
+  // Left pillar, right pillar, lintel — read as a doorway from the plaza.
+  for (const [dx, h] of [[-14, 34], [10, 34]] as const) {
+    ctx.fillStyle = '#1c2438'
+    ctx.fillRect(base.x + dx, base.y - h - 8, 4, h)
+  }
+  ctx.fillStyle = '#1c2438'
+  ctx.fillRect(base.x - 14, base.y - 46, 28, 5)
+  ctx.globalAlpha = glow
+  ctx.fillStyle = color
+  ctx.fillRect(base.x - 9, base.y - 38, 18, 30)
+  ctx.globalAlpha = 1
+}
+
+function drawDoorLabel(ctx: CanvasRenderingContext2D, door: DoorDraw, toScreen: ToScreen): void {
+  const p = toScreen({ x: door.x, y: door.y })
+  const line = `${door.label} · ${STATE_WORD[door.status]} ${door.occupancy}/${door.capacity}`
+  ctx.font = '700 11px ui-sans-serif, system-ui, sans-serif'
+  ctx.lineWidth = 3
+  ctx.strokeStyle = 'rgba(2, 6, 23, 0.85)'
+  ctx.strokeText(line, p.x, p.y - 52)
+  ctx.fillStyle = DOOR_COLORS[door.status]
+  ctx.fillText(line, p.x, p.y - 52)
+  if (door.bookingLabel) {
+    ctx.font = '500 10px ui-sans-serif, system-ui, sans-serif'
+    ctx.lineWidth = 3
+    ctx.strokeText(door.bookingLabel, p.x, p.y - 40)
+    ctx.fillStyle = '#ffd28a'
+    ctx.fillText(door.bookingLabel, p.x, p.y - 40)
+  }
 }
