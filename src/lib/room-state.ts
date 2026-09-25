@@ -86,6 +86,24 @@ export function leaveAllRooms(book: RoomBook, peerId: string): string[] {
   return left
 }
 
+// Register a spawned pod (the grab gesture's accept): the book is the only
+// registry, and the def carries isSpawned so summaries can render it on the
+// street. The def's dynamic flag drives the dissolve-when-empty lifecycle.
+export function spawnRoom(book: RoomBook, def: RoomDef): RoomState {
+  const state: RoomState = { def, occupants: new Map(), booking: null }
+  book.rooms.set(def.id, state)
+  return state
+}
+
+// Is the peer currently holding a seat anywhere? The grab gesture never pulls
+// someone out of (or into) a meeting they are already in.
+export function occupiesAnyRoom(book: RoomBook, peerId: string): boolean {
+  for (const state of book.rooms.values()) {
+    if (state.occupants.has(peerId)) return true
+  }
+  return false
+}
+
 // The one room (if any) both sockets currently share — the WebRTC relay only
 // forwards signaling between sockets that sit in the same room.
 export function sharedRoom(book: RoomBook, a: string, b: string): string | null {

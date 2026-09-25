@@ -2,7 +2,7 @@
 // Positions are world tiles (see world.ts). The v1 map per the build spec:
 // two phone-booth pods, two walk-in huddle zones, a boardroom door on the
 // hall, and an amphitheater stage kept as a layout stub (not bookable yet).
-import type { Vec2 } from './world'
+import { clampToWorld, type Vec2 } from './world'
 
 export type RoomKind = 'pod' | 'huddle' | 'boardroom' | 'stage'
 
@@ -26,6 +26,9 @@ export interface RoomDef {
   door: Vec2
   // Huddle walk-in zone rect (world tiles). Present only for huddle rooms.
   zone?: RoomZone
+  // Spawned pods are created by the grab gesture at accept time, never on the
+  // static map; they ride the dynamic lifecycle (dissolve when empty).
+  isSpawned?: boolean
 }
 
 export const ROOMS: RoomDef[] = [
@@ -85,4 +88,29 @@ export function doorNear(defs: RoomDef[], p: Vec2, radius = 0.9): RoomDef | null
     }
   }
   return best
+}
+
+// Nearest peer within `radius` world tiles of a click — canvas avatar hits
+// resolve to the grab gesture instead of a walk target.
+export function peerNear<T extends { id: string; x: number; y: number }>(
+  peers: T[],
+  p: Vec2,
+  radius = 1.2,
+): T | null {
+  let best: T | null = null
+  let bestDist = radius
+  for (const peer of peers) {
+    const dist = Math.hypot(peer.x - p.x, peer.y - p.y)
+    if (dist <= bestDist) {
+      best = peer
+      bestDist = dist
+    }
+  }
+  return best
+}
+
+// Where a spawned pod lands: midway between the two people, clamped into the
+// walkable band so the booth never materializes off-street.
+export function podSpawnPos(a: Vec2, b: Vec2): Vec2 {
+  return clampToWorld({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 })
 }
