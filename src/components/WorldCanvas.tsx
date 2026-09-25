@@ -6,6 +6,14 @@ import JoinPanel from './JoinPanel'
 import RoomView, { type ActiveRoom } from './RoomView'
 import { drawWorld, screenDirToWorldDir, screenToIso, type AvatarDraw, type DoorDraw } from './world/renderer'
 import { clampToWorld, SPAWN, stepToward, type Vec2 } from '@/lib/world'
+import {
+  HALL_TARGET,
+  ONBOARDING_START,
+  WALK_STEPS,
+  hasArrived,
+  readOnboardingRecord,
+  writeOnboardingRecord,
+} from '@/lib/onboarding'
 import { removePeer, snapshot, upsertPeer, newPeerBook, type PeerBook } from '@/lib/presence'
 import { doorNear, peerNear, zoneAt, ROOMS } from '@/lib/rooms'
 import type { JoinAck, PodInviteAck, PodInviteOutcome, RoomJoinAck, RoomSummary, WebRTCPacket } from '@/lib/protocol'
@@ -57,6 +65,12 @@ export default function WorldCanvas() {
   const pendingWhiteboardRef = useRef<StrokeData[]>([])
   const [profile, setProfile] = useState<AvatarProfile | null>(null)
   const profileRef = useRef<AvatarProfile | null>(null)
+  // Guided-walk state: null = not walking (fresh visitor not yet joined,
+  // walk finished, or skipped by a stored record). `complete` marks the
+  // arrival moment — banner up, flag written. The ref mirrors for the render
+  // loop, which checks arrivals at 60 fps without re-subscribing.
+  const [walk, setWalk] = useState<{ step: number; complete: boolean } | null>(null)
+  const walkRef = useRef<{ step: number; complete: boolean } | null>(null)
   const [roster, setRoster] = useState<RosterRow[]>([])
   const [rooms, setRooms] = useState<RoomSummary[]>([])
   const [activeRoom, setActiveRoom] = useState<ActiveRoom | null>(null)
@@ -86,18 +100,23 @@ export default function WorldCanvas() {
   // Join presence: the ack is the truth — the server places us at spawn and
   // answers with the world as it is. Also the recovery path after a reconnect,
   // when the server has dropped our old incarnation and its id changed.
-  const joinPresence = useCallback((socket: Socket) => {
+  const joinPresence = useCallback((socket: Socket, guided = false) => {
     const p = profileRef.current
     if (!p) return
     socket.emit('presence:join', p, (ack: JoinAck) => {
       if (!ack.ok) return
+      // A guided join starts the walk at the street's west end. The server
+      // still placed us at spawn, so the position is synced with a move —
+      // the server clamps and accepts it like any other.
+      const at = guided ? ONBOARDING_START : { x: ack.self.x, y: ack.self.y }
       simRef.current.self = {
         id: ack.self.id,
-        pos: { x: ack.self.x, y: ack.self.y },
-        render: { x: ack.self.x, y: ack.self.y },
+        pos: { ...at },
+        render: { ...at },
         moving: false,
       }
-      simRef.current.cam = { x: ack.self.x, y: ack.self.y }
+      simRef.current.cam = { x: at.x, y: at.y }
+      if (guided) socket.emit('presence:move', { x: at.x, y: at.y })
       simRef.current.book.peers.clear()
       simRef.current.renders.clear()
       for (const peer of ack.peers) {
@@ -162,9 +181,14 @@ export default function WorldCanvas() {
     })
   }, [])
 
-  const handleJoin = useCallback((p: AvatarProfile) => {
+  const handleJoin = useCallback((p: AvatarProfile, opts?: { guided?: boolean }) => {
     profileRef.current = p
     setProfile(p)
+    if (opts?.guided) {
+      const next = { step: 0, complete: false }
+      walkRef.current = next
+      setWalk(next)
+    }
 
     // Bring the transport up (or reuse it after a reconnect) and join the
     // street. WebSocket-only: the polling fallback's upgrade churn under load
@@ -262,7 +286,11 @@ export default function WorldCanvas() {
         sim.book.peers.clear()
         sim.renders.clear()
         sim.self = null
-        joinPresence(sock)
+        // A mid-walk reconnect resumes the walk where it was (and starts at
+        // the street's west end again); a finished or skipped walk rejoins
+        // at spawn like any returning visitor.
+        const walk = walkRef.current
+        joinPresence(sock, walk !== null && !walk.complete)
         const room = activeRoomRef.current
         if (room) {
           requestRoomJoin(room.id, () => {
@@ -274,8 +302,50 @@ export default function WorldCanvas() {
       })
     }
 
-    joinPresence(socket)
+    joinPresence(socket, opts?.guided ?? false)
   }, [joinPresence, requestRoomJoin])
+
+  // Returning visitors skip straight into the world: a valid stored record
+  // joins with the saved profile — no styling step, no walk. Runs once on
+  // mount; handleJoin is stable so the effect never re-fires.
+  useEffect(() => {
+    const record = readOnboardingRecord(window.localStorage)
+    if (record) handleJoin(record.profile)
+  }, [handleJoin])
+
+  // Walk transitions, called from the render loop on arrival — change
+  // detection lives in the loop, React state flips here (the same split the
+  // huddle-zone affordance uses).
+  const advanceWalk = useCallback(() => {
+    const cur = walkRef.current
+    if (!cur) return
+    const next = { step: cur.step + 1, complete: false }
+    walkRef.current = next
+    setWalk(next)
+  }, [])
+
+  const completeWalk = useCallback(() => {
+    const p = profileRef.current
+    if (!p) return
+    // The record lands the moment the hall is reached — the banner is the
+    // moment, the record is the fact.
+    writeOnboardingRecord(window.localStorage, p, Date.now())
+    // The server-side copy is a best-effort archive: the local record is the
+    // identity, the row is the world's memory. A failure is logged loudly,
+    // never silent, and never holds the completion moment hostage.
+    fetch('/api/profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(p),
+    })
+      .then((res) => {
+        if (!res.ok) console.error(`profile archive failed: HTTP ${res.status}`)
+      })
+      .catch((err: unknown) => console.error('profile archive failed', err))
+    const next = { step: walkRef.current?.step ?? 0, complete: true }
+    walkRef.current = next
+    setWalk(next)
+  }, [])
 
   // Door-click entry: one room at a time, the same arbitration path a
   // reconnect uses.
@@ -406,6 +476,15 @@ export default function WorldCanvas() {
         // Local sim is immediate; peers arrive from the server and ease.
         self.render = { ...self.pos }
 
+        // Guided-walk arrival: the hall completes from any step; the current
+        // waypoint advances the lesson.
+        const walk = walkRef.current
+        if (walk && !walk.complete) {
+          const last = WALK_STEPS.length - 1
+          if (hasArrived(self.pos, HALL_TARGET)) completeWalk()
+          else if (walk.step < last && hasArrived(self.pos, WALK_STEPS[walk.step].target)) advanceWalk()
+        }
+
         // Send our position at most ~15 Hz, only when it changed.
         if (now - lastSendAt >= MOVE_SEND_MS && (self.pos.x !== lastSent.x || self.pos.y !== lastSent.y)) {
           lastSendAt = now
@@ -493,7 +572,11 @@ export default function WorldCanvas() {
           bookingLabel: null,
         })
       }
-      drawWorld({ ctx, width, height, cam: sim.cam, time: now, self: selfDraw, peers: peerDraws, doors })
+      // The walk's light path: the current lesson's ring on the ground.
+      const walk = walkRef.current
+      const step = walk && !walk.complete ? WALK_STEPS[walk.step] : null
+      const guide = step ? { x: step.target.x, y: step.target.y, label: step.ringLabel } : null
+      drawWorld({ ctx, width, height, cam: sim.cam, time: now, self: selfDraw, peers: peerDraws, doors, guide })
     }
     raf = requestAnimationFrame(loop)
 
@@ -521,7 +604,7 @@ export default function WorldCanvas() {
     }
     // joinRoomById and invitePeer are stable useCallbacks; the sim is a ref.
     // The effect subscribes once for the lifetime of the component.
-  }, [joinRoomById, invitePeer])
+  }, [joinRoomById, invitePeer, advanceWalk, completeWalk])
 
   // The doors panel: static rooms plus any pod the grab gesture spawned —
   // spawned rows ride their summary (name, capacity, joinable) while alive.
@@ -696,6 +779,46 @@ export default function WorldCanvas() {
         </div>
       ) : null}
 
+      {/* The guided walk: one hint at a time, the ring on the canvas marks
+          the spot. The chip yields while a room view is up. */}
+      {walk && !walk.complete && !activeRoom ? (
+        <div
+          data-testid="onboarding-hint"
+          role="status"
+          className="absolute bottom-6 left-1/2 z-20 -translate-x-1/2 rounded-full border border-sky-400/40 bg-slate-900/90 px-5 py-2 text-sm text-sky-100 shadow-lg"
+        >
+          {WALK_STEPS[walk.step]?.hint}
+        </div>
+      ) : null}
+
+      {/* The completion moment: arrival at the hall raised the flag before
+          this banner appeared — dismissing it is purely cosmetic. */}
+      {walk?.complete ? (
+        <div
+          data-testid="onboarding-complete"
+          className="absolute inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-sm"
+        >
+          <div className="w-96 rounded-2xl border border-sky-400/30 bg-slate-900/95 p-8 text-center shadow-2xl">
+            <span className="mx-auto block h-5 w-5 rounded-full" style={{ backgroundColor: profile?.color ?? '#f26d6d' }} />
+            <h2 className="mt-3 text-xl font-semibold text-white">Welcome to Atrium, {profile?.name ?? 'friend'}</h2>
+            <p className="mt-2 text-sm text-slate-400">
+              You found the hall. The doors are open on the right — and anyone on the street is one click from a pod.
+            </p>
+            <button
+              type="button"
+              data-testid="onboarding-done"
+              onClick={() => {
+                walkRef.current = null
+                setWalk(null)
+              }}
+              className="mt-6 w-full rounded-lg bg-sky-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-sky-400"
+            >
+              Start exploring
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       {toast ? (
         <div
           data-testid="door-toast"
@@ -720,7 +843,7 @@ export default function WorldCanvas() {
         />
       ) : null}
 
-      {!profile && <JoinPanel onJoin={handleJoin} />}
+      {!profile && <JoinPanel onJoin={(p) => handleJoin(p, { guided: true })} />}
     </div>
   )
 }

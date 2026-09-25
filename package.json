@@ -6,6 +6,7 @@
     "dev": "tsx server.ts",
     "build": "next build",
     "start": "NODE_ENV=production tsx server.ts",
+    "postinstall": "prisma generate",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

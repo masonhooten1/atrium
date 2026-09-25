@@ -54,6 +54,15 @@ export interface DrawWorldArgs {
   peers: AvatarDraw[]
   // Live door state per room — what the pads and labels show on the street.
   doors: DoorDraw[]
+  // The onboarding waypoint (or null off the walk): a ground ring the walk
+  // teaches toward.
+  guide: GuideDraw | null
+}
+
+export interface GuideDraw {
+  x: number
+  y: number
+  label: string
 }
 
 // One door's live state, already resolved by the caller from the room summary.
@@ -93,7 +102,7 @@ function rectPts(x: number, y: number, w: number, d: number): Vec2[] {
   ]
 }
 
-export function drawWorld({ ctx, width, height, cam, time, self, peers, doors }: DrawWorldArgs): void {
+export function drawWorld({ ctx, width, height, cam, time, self, peers, doors, guide }: DrawWorldArgs): void {
   const cx = width / 2
   const cy = height / 2
   const toScreen: ToScreen = (p) => {
@@ -105,6 +114,7 @@ export function drawWorld({ ctx, width, height, cam, time, self, peers, doors }:
   drawSkyline(ctx, width, toScreen, cam)
   drawGround(ctx, toScreen)
   drawRoomGround(ctx, doors, toScreen, time)
+  if (guide) drawGuideRing(ctx, guide, toScreen, time)
 
   const avatars: AvatarDraw[] = [...peers, ...(self ? [self] : [])]
 
@@ -646,6 +656,32 @@ function drawBoardroomPortal(ctx: CanvasRenderingContext2D, door: DoorDraw, toSc
   ctx.fillStyle = color
   ctx.fillRect(base.x - 9, base.y - 38, 18, 30)
   ctx.globalAlpha = 1
+}
+
+// The onboarding waypoint: a pulsing ground ring with a soft light column —
+// the walk's light path. Ground-level like door pads so avatars stride over
+// it, sky-colored so it never reads as a door.
+function drawGuideRing(ctx: CanvasRenderingContext2D, guide: GuideDraw, toScreen: ToScreen, time: number): void {
+  const base = toScreen({ x: guide.x, y: guide.y })
+  const pulse = 0.5 + 0.3 * Math.sin(time / 500)
+  ctx.setLineDash([6, 4])
+  ctx.strokeStyle = `rgba(125, 211, 252, ${0.55 + 0.3 * pulse})`
+  ctx.lineWidth = 2
+  ctx.beginPath()
+  ctx.ellipse(base.x, base.y, 22 + pulse * 3, 11 + pulse * 1.5, 0, 0, Math.PI * 2)
+  ctx.stroke()
+  ctx.setLineDash([])
+  const beam = ctx.createLinearGradient(base.x, base.y - 90, base.x, base.y)
+  beam.addColorStop(0, 'rgba(125, 211, 252, 0)')
+  beam.addColorStop(1, `rgba(125, 211, 252, ${0.26 + 0.14 * pulse})`)
+  ctx.fillStyle = beam
+  ctx.fillRect(base.x - 3, base.y - 90, 6, 90)
+  ctx.font = '600 12px ui-sans-serif, system-ui, sans-serif'
+  ctx.lineWidth = 3
+  ctx.strokeStyle = 'rgba(2, 6, 23, 0.85)'
+  ctx.strokeText(guide.label, base.x, base.y - 96)
+  ctx.fillStyle = '#7dd3fc'
+  ctx.fillText(guide.label, base.x, base.y - 96)
 }
 
 function drawDoorLabel(ctx: CanvasRenderingContext2D, door: DoorDraw, toScreen: ToScreen): void {

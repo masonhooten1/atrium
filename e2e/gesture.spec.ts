@@ -100,7 +100,16 @@ gestureTest('declining leaves both on the street with nothing spawned', async ({
   await joinStreet(alpha, 'Delta')
   await joinStreet(bravo, 'Echo')
 
-  // Both stand at spawn: a center click hits the peer, not the street.
+  // The guided walk moved both avatars to the street's west end. The roster
+  // shows the server position, but the click picks from the eased render —
+  // wait for both to converge before the center click.
+  await expect
+    .poll(async () => Number(await alpha.getByTestId('peer-Echo').getAttribute('data-x')))
+    .toBeLessThan(3)
+  await alpha.waitForTimeout(800)
+
+  // Both stand at the onboarding start: a center click hits the peer, not
+  // the street.
   const vp = alpha.viewportSize() ?? { width: 1280, height: 720 }
   await alpha.getByTestId('world-canvas').click({ position: { x: vp.width / 2, y: vp.height / 2 } })
   await expect(alpha.getByTestId('pod-pending')).toBeVisible()
@@ -122,6 +131,13 @@ gestureTest('an unanswered invite expires after 30 s with nothing spawned', asyn
   test.setTimeout(60_000)
   await joinStreet(alpha, 'Foxtrot')
   await joinStreet(bravo, 'Golf')
+
+  // Same converge-then-click as the decline test: the guided walk moved both
+  // avatars west, and the pick runs on the eased render.
+  await expect
+    .poll(async () => Number(await alpha.getByTestId('peer-Golf').getAttribute('data-x')))
+    .toBeLessThan(3)
+  await alpha.waitForTimeout(800)
 
   const vp = alpha.viewportSize() ?? { width: 1280, height: 720 }
   await alpha.getByTestId('world-canvas').click({ position: { x: vp.width / 2, y: vp.height / 2 } })
