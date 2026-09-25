@@ -19,6 +19,12 @@ const eslintConfig = [
     ],
   },
   ...compat.extends('next/core-web-vitals', 'next/typescript'),
+  {
+    // Playwright fixtures call `use(page)` to hand pages to tests — not a
+    // React hook, whatever the rules-of-hooks heuristic thinks.
+    files: ['e2e/**/*.ts'],
+    rules: { 'react-hooks/rules-of-hooks': 'off' },
+  },
 ]
 
 export default eslintConfig

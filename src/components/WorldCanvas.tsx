@@ -651,7 +651,17 @@ export default function WorldCanvas() {
               const inviteId = incoming.inviteId
               incomingRef.current = null
               setIncoming(null)
-              socketRef.current?.emit('pod:invite:respond', { inviteId, accept: false })
+              // The ack is not decoration: the server refuses unacked
+              // responds outright, so a bare emit would leave the inviter
+              // waiting out the full 30 s expiry on a no that already
+              // happened.
+              socketRef.current?.emit(
+                'pod:invite:respond',
+                { inviteId, accept: false },
+                (ack: { ok: true; outcome: PodInviteOutcome } | { ok: false; reason: 'unknown' | 'not-target' }) => {
+                  if (!ack.ok) setToast('That pod invite is no longer there.')
+                },
+              )
             }}
             className="rounded-full border border-slate-500 px-3 py-1 text-xs font-semibold text-slate-200 hover:bg-white/5"
           >
