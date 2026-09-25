@@ -125,6 +125,10 @@ gestureTest('an unanswered invite expires after 30 s with nothing spawned', asyn
 
   const vp = alpha.viewportSize() ?? { width: 1280, height: 720 }
   await alpha.getByTestId('world-canvas').click({ position: { x: vp.width / 2, y: vp.height / 2 } })
+  // The sender's side confirms the click actually opened an invite before we
+  // judge the receiver — otherwise a cold-boot click that misses the peer
+  // reads as an expiry bug.
+  await expect(alpha.getByTestId('pod-pending')).toBeVisible()
   await expect(bravo.getByTestId('pod-incoming')).toBeVisible()
 
   // Nobody answers: the invite expires, the prompt resolves itself on both
