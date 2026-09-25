@@ -54,7 +54,14 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
 
+      - name: Apply Prisma migrations
+        env:
+          DATABASE_URL: file:./prisma/ci.db
+        run: npx prisma migrate deploy
+
       - name: E2E tests
+        env:
+          DATABASE_URL: file:./prisma/ci.db
         run: npm run test:e2e
 
       - name: Upload Playwright report

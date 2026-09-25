@@ -9,7 +9,11 @@ import { clampToWorld, SPAWN, stepToward, type Vec2 } from '@/lib/world'
 import { removePeer, snapshot, upsertPeer, newPeerBook, type PeerBook } from '@/lib/presence'
 import { doorNear, peerNear, zoneAt, ROOMS } from '@/lib/rooms'
 import type { JoinAck, PodInviteAck, PodInviteOutcome, RoomJoinAck, RoomSummary, WebRTCPacket } from '@/lib/protocol'
+import type { StrokeData } from '@/lib/whiteboard'
 import type { AvatarProfile } from '@/lib/avatar-presets'
+import BookingForm from '@/components/BookingForm'
+
+const BOARDROOM_ID = ROOMS.find((r) => r.kind === 'boardroom')?.id ?? ''
 
 const SPEED = 3.5 // world tiles per second
 const MOVE_SEND_MS = 1000 / 15 // client-side send throttle, ~15 Hz
@@ -47,6 +51,10 @@ export default function WorldCanvas() {
   // socket.io drops events nobody is listening for.
   const signalSinkRef = useRef<((p: WebRTCPacket) => void) | null>(null)
   const pendingSignalsRef = useRef<WebRTCPacket[]>([])
+  // Whiteboard strokes get the same capture: a room-mate can be drawing the
+  // moment we join, before the room view mounts.
+  const whiteboardSinkRef = useRef<((stroke: StrokeData) => void) | null>(null)
+  const pendingWhiteboardRef = useRef<StrokeData[]>([])
   const [profile, setProfile] = useState<AvatarProfile | null>(null)
   const profileRef = useRef<AvatarProfile | null>(null)
   const [roster, setRoster] = useState<RosterRow[]>([])
@@ -121,8 +129,10 @@ export default function WorldCanvas() {
       activeRoomRef.current = {
         id: ack.room.id,
         name: ack.room.name,
+        kind: ack.room.kind,
         capacity: ack.room.capacity,
         peers: ack.peers,
+        strokes: ack.strokes,
       }
       setActiveRoom(activeRoomRef.current)
       setZoneOffer(null)
@@ -205,6 +215,11 @@ export default function WorldCanvas() {
         // packet for the drain when the view mounts.
         if (signalSinkRef.current) signalSinkRef.current(p)
         else pendingSignalsRef.current.push(p)
+      })
+      socket.on('whiteboard:stroke', ({ roomId, stroke }) => {
+        if (activeRoomRef.current?.id !== roomId) return
+        if (whiteboardSinkRef.current) whiteboardSinkRef.current(stroke)
+        else pendingWhiteboardRef.current.push(stroke)
       })
       socket.on('pod:incoming', ({ inviteId, from }) => {
         const next = { inviteId, fromName: from.name }
@@ -551,12 +566,13 @@ export default function WorldCanvas() {
         </ul>
       </aside>
 
-      {/* Doors read the live summary — open/full with occupancy, reserved with
-          the next booking, or a stub until its slice lands. Clicking a row is
-          a convenience twin of clicking the pad on the canvas. */}
+      {/* Doors and the booking desk share one column: the doors read the
+          live summary — open/full with occupancy, reserved with the next
+          booking — and the boardroom's form books its future. */}
+      <div className="absolute right-4 top-40 z-10 flex w-60 flex-col gap-3">
       <aside
         data-testid="doors"
-        className="absolute right-4 top-40 z-10 w-60 rounded-xl border border-white/10 bg-slate-900/80 px-4 py-3 text-sm backdrop-blur"
+        className="rounded-xl border border-white/10 bg-slate-900/80 px-4 py-3 text-sm backdrop-blur"
       >
         <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">Doors</div>
         <ul className="mt-2 space-y-1.5">
@@ -598,6 +614,8 @@ export default function WorldCanvas() {
           })}
         </ul>
       </aside>
+      {profile && BOARDROOM_ID ? <BookingForm roomId={BOARDROOM_ID} booker={profile.name} /> : null}
+      </div>
 
       {/* Huddle zones are doors that follow you — a chip, not a fixed place. */}
       {zoneOffer && !activeRoom ? (
@@ -692,10 +710,13 @@ export default function WorldCanvas() {
         <RoomView
           socket={socketRef.current}
           selfName={profile?.name ?? ''}
+          selfColor={profile?.color ?? '#f26d6d'}
           room={activeRoom}
           onLeave={() => leaveRoomById(activeRoom.id)}
           signalSink={signalSinkRef}
           pendingSignals={pendingSignalsRef}
+          whiteboardSink={whiteboardSinkRef}
+          pendingWhiteboard={pendingWhiteboardRef}
         />
       ) : null}
 

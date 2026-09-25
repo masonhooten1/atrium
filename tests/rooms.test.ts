@@ -82,7 +82,8 @@ describe('reserved bookings', () => {
     }
     expect(joinRoom(book, 'boardroom', 'a', NOW)).toEqual({ ok: true, seat: 0 })
     const view = doorView(mustState(book, 'boardroom'), ROOMS[4], NOW)
-    expect(view.status).toBe('open')
+    // A live booking reads "in session" even though the door still admits.
+    expect(view.status).toBe('reserved')
     expect(view.booking?.live).toBe(true)
   })
 
